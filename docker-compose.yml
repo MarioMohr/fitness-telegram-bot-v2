@@ -1,11 +1,12 @@
 services:
-  fitness-bot:
+  fitness_telegram_bot_v2:
     build: .
-    container_name: fitness_bot_v2
+    container_name: fitness_telegram_bot_v2
     restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - ./scripts:/app/scripts
 

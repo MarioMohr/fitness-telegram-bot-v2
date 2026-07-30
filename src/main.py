@@ -49,7 +49,19 @@ def init_db() -> None:
     cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('version', '2.0')")
     cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('project_name', 'Fitness Trainer V2')")
 
-    # Weight logs (Raw weigh-ins with precise timestamp)
+    # Pool logs schema
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pool_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            occupancy TEXT NOT NULL,
+            is_holiday INTEGER DEFAULT 0,
+            is_raining INTEGER DEFAULT 0,
+            recommendation TEXT NOT NULL
+        )
+    ''')
+
+    # Weight logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weight_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +70,7 @@ def init_db() -> None:
         )
     ''')
 
-    # Body measurements (Chest, Arms, Waist)
+    # Body measurements
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS body_measures (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +81,7 @@ def init_db() -> None:
         )
     ''')
 
-    # Micro-Nutrient logs (Cargill Cacao / Cashews)
+    # Micro-Nutrient logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS nutrient_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,16 +94,59 @@ def init_db() -> None:
     conn.close()
     logger.info("Database schemas verified.")
 
+def get_pool_occupancy_stats() -> str:
+    """Calculates best times to swim per day of week based on historical data."""
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT timestamp, occupancy FROM pool_logs", conn)
+    conn.close()
+
+    if df.empty:
+        return "📊 _No historical pool data available yet._"
+
+    df['datetime'] = pd.to_datetime(df['timestamp'], format='ISO8601', errors='coerce')
+    df = df.dropna(subset=['datetime'])
+
+    total_logs = len(df)
+    empty_logs = df[df['occupancy'] == 'Empty'].copy()
+
+    if empty_logs.empty:
+        return f"📊 **Pool Analytics** ({total_logs} logs)\n_No 'Empty' states recorded so far._"
+
+    empty_logs['day_num'] = empty_logs['datetime'].dt.dayofweek
+    empty_logs['hour'] = empty_logs['datetime'].dt.hour
+
+    days_map = {
+        0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu",
+        4: "Fri", 5: "Sat", 6: "Sun"
+    }
+
+    daily_lines = []
+    for day_num in range(7):
+        day_name = days_map[day_num]
+        day_data = empty_logs[empty_logs['day_num'] == day_num]
+        
+        if day_data.empty:
+            daily_lines.append(f"• **{day_name}:** `No data`")
+        else:
+            best_hour = day_data['hour'].value_counts().index[0]
+            count = day_data['hour'].value_counts().iloc[0]
+            time_slot = f"{best_hour:02d}:00 - {best_hour+1:02d}:00"
+            daily_lines.append(f"• **{day_name}:** `{time_slot}` ({count}x empty)")
+
+    stats_msg = (
+        f"📊 **Weekly Best Swim Windows** ({total_logs} logs)\n"
+        f"_Most frequent empty slots per day:_\n\n" +
+        "\n".join(daily_lines)
+    )
+    return stats_msg
+
 def save_weight_and_get_ewma(weight_kg: float) -> tuple[float, float]:
     """Saves raw weight to SQLite, computes daily averages, and returns (daily_avg, ewma_7d)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # Insert new raw log
     cursor.execute("INSERT INTO weight_logs (weight_kg) VALUES (?)", (weight_kg,))
     conn.commit()
 
-    # Load all weight logs into Pandas for EWMA calculation
     df = pd.read_sql_query("SELECT timestamp, weight_kg FROM weight_logs", conn)
     conn.close()
 
@@ -99,7 +154,6 @@ def save_weight_and_get_ewma(weight_kg: float) -> tuple[float, float]:
     daily_df = df.groupby('date')['weight_kg'].mean().reset_index()
     daily_df = daily_df.sort_values('date')
 
-    # 7-day Span Exponentially Weighted Moving Average
     daily_df['ewma_7d'] = daily_df['weight_kg'].ewm(span=7, adjust=False).mean()
 
     latest_daily_avg = daily_df.iloc[-1]['weight_kg']
@@ -145,13 +199,16 @@ def build_main_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def build_pool_menu() -> InlineKeyboardMarkup:
+def build_pool_menu(is_holiday: bool = False, is_raining: bool = False) -> InlineKeyboardMarkup:
+    hol_label = "✅ Public Holiday" if is_holiday else "☐ Public Holiday"
+    rain_label = "✅ Raining" if is_raining else "☐ Raining"
+
     keyboard = [
         [InlineKeyboardButton("Status: Empty", callback_data="pool_status_empty")],
         [InlineKeyboardButton("Status: Partially Occupied", callback_data="pool_status_partial")],
         [InlineKeyboardButton("Status: Full", callback_data="pool_status_full")],
-        [InlineKeyboardButton("☐ Public Holiday", callback_data="pool_toggle_holiday")],
-        [InlineKeyboardButton("☐ Raining", callback_data="pool_toggle_rain")],
+        [InlineKeyboardButton(hol_label, callback_data="pool_toggle_holiday")],
+        [InlineKeyboardButton(rain_label, callback_data="pool_toggle_rain")],
         [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu_main")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -184,9 +241,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `20 laps` or `Twenty Laps`\n"
         "• `My legs hurt` / `Meine Beine tun weh`"
     )
-    # Schritt A: Das alte Tastaturmenue unten an der Tastatur loeschen
     await update.message.reply_text("Clearing old layout...", reply_markup=ReplyKeyboardRemove())
-    # Schritt B: Das neue Inline-Menue direkt in der Nachricht mitsenden
     await update.message.reply_text(welcome_text, reply_markup=build_main_menu(), parse_mode="Markdown")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -198,7 +253,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "menu_main":
         await query.edit_message_text("Main Menu:", reply_markup=build_main_menu())
     elif data == "menu_pool":
-        await query.edit_message_text("🏊 **Pool Status & Conditions**", reply_markup=build_pool_menu(), parse_mode="Markdown")
+        is_hol = context.user_data.get('pool_holiday', False)
+        is_rain = context.user_data.get('pool_rain', False)
+        stats = get_pool_occupancy_stats()
+        await query.edit_message_text(
+            f"🏊 **Pool Status & Conditions**\n\n{stats}",
+            reply_markup=build_pool_menu(is_hol, is_rain),
+            parse_mode="Markdown"
+        )
+    elif data == "pool_toggle_holiday":
+        context.user_data['pool_holiday'] = not context.user_data.get('pool_holiday', False)
+        is_hol = context.user_data['pool_holiday']
+        is_rain = context.user_data.get('pool_rain', False)
+        stats = get_pool_occupancy_stats()
+        await query.edit_message_text(
+            f"🏊 **Pool Status & Conditions**\n\n{stats}",
+            reply_markup=build_pool_menu(is_hol, is_rain),
+            parse_mode="Markdown"
+        )
+    elif data == "pool_toggle_rain":
+        context.user_data['pool_rain'] = not context.user_data.get('pool_rain', False)
+        is_hol = context.user_data.get('pool_holiday', False)
+        is_rain = context.user_data['pool_rain']
+        stats = get_pool_occupancy_stats()
+        await query.edit_message_text(
+            f"🏊 **Pool Status & Conditions**\n\n{stats}",
+            reply_markup=build_pool_menu(is_hol, is_rain),
+            parse_mode="Markdown"
+        )
     elif data == "menu_sport":
         await query.edit_message_text("🏋️ **Sport & Activity Tracking**", reply_markup=build_sport_menu(), parse_mode="Markdown")
     elif data == "menu_nutrients":
