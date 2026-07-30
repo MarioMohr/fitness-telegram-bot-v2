@@ -1,3 +1,4 @@
+FROM python:3.11-slim
 
 # System-Pakete installieren (inklusive FFmpeg für den späteren Video-Pipeline-Schritt)
 RUN apt-get update && apt-get install -y \
