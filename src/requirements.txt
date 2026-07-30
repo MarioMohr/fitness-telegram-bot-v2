@@ -1,0 +1,7 @@
+python-telegram-bot==20.7
+pandas==2.2.0
+matplotlib==3.8.2
+sqlite3-api==0.2.2
+python-dotenv==1.0.1
+dateparser==1.2.0
+

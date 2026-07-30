@@ -1,0 +1,11 @@
+services:
+  fitness-bot:
+    build: .
+    container_name: fitness_bot_v2
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+
