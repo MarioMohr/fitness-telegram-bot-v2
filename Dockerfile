@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# System-Pakete installieren (inklusive FFmpeg für den späteren Video-Pipeline-Schritt)
+# System Pakete installieren
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -9,11 +9,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Python-Abhängigkeiten
-COPY src/requirements.txt .
+# Python Abhängigkeiten
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src/ ./src/
+COPY app/ ./app/
 
-CMD ["python", "src/main.py"]
+CMD ["python", "app/main.py"]
 

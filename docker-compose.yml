@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config
+      - ./app/data:/app/data
+      - ./app/config:/app/config
       - ./scripts:/app/scripts
 
