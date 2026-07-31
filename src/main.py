@@ -3,13 +3,13 @@ import re
 import sqlite3
 import logging
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 import pandas as pd
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 DB_PATH = "/app/data/fitness.db"
 
+# Zeitzone aus der Environment Variable lesen
+TZ_NAME = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
+
 WORD_TO_NUM = {
     'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
     'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
@@ -32,14 +35,44 @@ WORD_TO_NUM = {
     'thirty': 30, 'forty': 40, 'fifty': 50
 }
 
-# --- Database Setup & EWMA Calculation ---
+# --- Helper Functions ---
+
+def get_local_now() -> datetime:
+    """Returns current datetime in configured timezone."""
+    try:
+        return datetime.now(ZoneInfo(TZ_NAME))
+    except Exception as e:
+        logger.error(f"Error loading timezone {TZ_NAME}: {e}")
+        return datetime.now()
+
+def is_night_lock() -> bool:
+    """Returns True if local time is between 22:00 and 07:00."""
+    current_hour = get_local_now().hour
+    return current_hour >= 22 or current_hour < 7
+
+def get_status_overview(is_hol: bool, is_rain: bool) -> str:
+    """Generates aligned status overview using ENABLED and DISABLED."""
+    hol_str = "🟢 ENABLED" if is_hol else "🔴 DISABLED"
+    rain_str = "🟢 ENABLED" if is_rain else "🔴 DISABLED"
+    
+    if is_night_lock():
+        hours_str = "🔴 DISABLED"
+    else:
+        hours_str = "🟢 ENABLED"
+
+    return (
+        f"🌴 Holiday: {hol_str}\n"
+        f"🌧️ Raining: {rain_str}\n"
+        f"🏊 7am - 10pm: {hours_str}"
+    )
+
+# --- Database Setup ---
 
 def init_db() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # System info
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_info (
             key TEXT PRIMARY KEY,
@@ -49,7 +82,6 @@ def init_db() -> None:
     cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('version', '2.0')")
     cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('project_name', 'Fitness Trainer V2')")
 
-    # Pool logs schema
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pool_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +93,6 @@ def init_db() -> None:
         )
     ''')
 
-    # Weight logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS weight_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +101,6 @@ def init_db() -> None:
         )
     ''')
 
-    # Body measurements
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS body_measures (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +111,6 @@ def init_db() -> None:
         )
     ''')
 
-    # Micro-Nutrient logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS nutrient_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,54 +123,22 @@ def init_db() -> None:
     conn.close()
     logger.info("Database schemas verified.")
 
-def get_pool_occupancy_stats() -> str:
-    """Calculates best times to swim per day of week based on historical data."""
+def log_pool_status(occupancy: str, is_holiday: bool, is_raining: bool) -> None:
+    """Saves pool log to DB."""
+    now_iso = get_local_now().isoformat()
+    hol_int = 1 if is_holiday else 0
+    rain_int = 1 if is_raining else 0
+
     conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT timestamp, occupancy FROM pool_logs", conn)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pool_logs (timestamp, occupancy, is_holiday, is_raining, recommendation) VALUES (?, ?, ?, ?, ?)",
+        (now_iso, occupancy, hol_int, rain_int, "")
+    )
+    conn.commit()
     conn.close()
 
-    if df.empty:
-        return "📊 _No historical pool data available yet._"
-
-    df['datetime'] = pd.to_datetime(df['timestamp'], format='ISO8601', errors='coerce')
-    df = df.dropna(subset=['datetime'])
-
-    total_logs = len(df)
-    empty_logs = df[df['occupancy'] == 'Empty'].copy()
-
-    if empty_logs.empty:
-        return f"📊 **Pool Analytics** ({total_logs} logs)\n_No 'Empty' states recorded so far._"
-
-    empty_logs['day_num'] = empty_logs['datetime'].dt.dayofweek
-    empty_logs['hour'] = empty_logs['datetime'].dt.hour
-
-    days_map = {
-        0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu",
-        4: "Fri", 5: "Sat", 6: "Sun"
-    }
-
-    daily_lines = []
-    for day_num in range(7):
-        day_name = days_map[day_num]
-        day_data = empty_logs[empty_logs['day_num'] == day_num]
-        
-        if day_data.empty:
-            daily_lines.append(f"• **{day_name}:** `No data`")
-        else:
-            best_hour = day_data['hour'].value_counts().index[0]
-            count = day_data['hour'].value_counts().iloc[0]
-            time_slot = f"{best_hour:02d}:00 - {best_hour+1:02d}:00"
-            daily_lines.append(f"• **{day_name}:** `{time_slot}` ({count}x empty)")
-
-    stats_msg = (
-        f"📊 **Weekly Best Swim Windows** ({total_logs} logs)\n"
-        f"_Most frequent empty slots per day:_\n\n" +
-        "\n".join(daily_lines)
-    )
-    return stats_msg
-
 def save_weight_and_get_ewma(weight_kg: float) -> tuple[float, float]:
-    """Saves raw weight to SQLite, computes daily averages, and returns (daily_avg, ewma_7d)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO weight_logs (weight_kg) VALUES (?)", (weight_kg,))
@@ -162,16 +159,15 @@ def save_weight_and_get_ewma(weight_kg: float) -> tuple[float, float]:
     return float(latest_daily_avg), float(latest_ewma)
 
 def toggle_nutrient_log(status: int) -> str:
-    today_str = date.today().isoformat()
+    today_str = get_local_now().date().isoformat()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO nutrient_logs (date, cacao_cashews_taken) VALUES (?, ?)", (today_str, status))
     conn.commit()
     conn.close()
-    return "Taken ✅" if status == 1 else "Not Taken ❌"
+    return "Taken" if status == 1 else "Not Taken"
 
 def clean_number(num_str: str) -> float:
-    """Handles thousand separators and decimal points cleanly."""
     num_str = num_str.strip()
     if '.' in num_str and ',' in num_str:
         num_str = num_str.replace('.', '').replace(',', '.')
@@ -189,184 +185,252 @@ def clean_number(num_str: str) -> float:
 
 # --- Keyboards & Menus ---
 
-def build_main_menu() -> InlineKeyboardMarkup:
+def build_main_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("🏊 Pool Status", callback_data="menu_pool")],
-        [InlineKeyboardButton("🏋️ Sport & Training", callback_data="menu_sport")],
-        [InlineKeyboardButton("📊 Stats, Measures & Goals", callback_data="menu_stats")],
-        [InlineKeyboardButton("☕ Nutrients", callback_data="menu_nutrients")],
-        [InlineKeyboardButton("🤖 Ollama AI Coach", callback_data="menu_coach")]
+        [KeyboardButton("🏊 Pool Status"), KeyboardButton("🏋️ Sport & Training")],
+        [KeyboardButton("📊 Stats, Measures & Goals"), KeyboardButton("☕ Nutrients")]
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def build_pool_menu(is_holiday: bool = False, is_raining: bool = False) -> InlineKeyboardMarkup:
-    hol_label = "✅ Public Holiday" if is_holiday else "☐ Public Holiday"
-    rain_label = "✅ Raining" if is_raining else "☐ Raining"
-
+def build_pool_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("Status: Empty", callback_data="pool_status_empty")],
-        [InlineKeyboardButton("Status: Partially Occupied", callback_data="pool_status_partial")],
-        [InlineKeyboardButton("Status: Full", callback_data="pool_status_full")],
-        [InlineKeyboardButton(hol_label, callback_data="pool_toggle_holiday")],
-        [InlineKeyboardButton(rain_label, callback_data="pool_toggle_rain")],
-        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu_main")]
+        [KeyboardButton("Status: Empty")],
+        [KeyboardButton("Status: Partially Occupied")],
+        [KeyboardButton("Status: Full")],
+        [KeyboardButton("🌴 Public Holiday"), KeyboardButton("🌧️ Raining")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def build_sport_menu() -> InlineKeyboardMarkup:
+def build_sport_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("🏊 Swim Log", callback_data="sport_swim"), InlineKeyboardButton("🥾 Walk / Trekking", callback_data="sport_walk")],
-        [InlineKeyboardButton("🛕 Batu Caves", callback_data="sport_batu"), InlineKeyboardButton("🧘 DDP Yoga", callback_data="sport_ddpy")],
-        [InlineKeyboardButton("🫁 Breathing / Apnea", callback_data="sport_breath"), InlineKeyboardButton("🏋️ Anatoly Workout", callback_data="sport_anatoly")],
-        [InlineKeyboardButton("💥 High Intensity / Sex", callback_data="sport_sex")],
-        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu_main")]
+        [KeyboardButton("🏊 Swim Log"), KeyboardButton("🚶 Walk / Trekking")],
+        [KeyboardButton("🛕 Batu Caves"), KeyboardButton("🧘 DDP Yoga")],
+        [KeyboardButton("🫁 Breathing / Apnea"), KeyboardButton("🏋️ Anatoly Workout")],
+        [KeyboardButton("💥 High Intensity / Cardio")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def build_nutrients_menu() -> InlineKeyboardMarkup:
+def build_nutrients_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("☕ Mark: Cacao / Cashews Taken", callback_data="nutrient_yes")],
-        [InlineKeyboardButton("❌ Mark: Not Taken Today", callback_data="nutrient_no")],
-        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu_main")]
+        [KeyboardButton("☕ Mark: Cacao / Cashews Taken")],
+        [KeyboardButton("❌ Mark: Not Taken Today")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # --- Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = (
-        "Welcome to **Fitness Trainer V2**!\n\n"
+        "Welcome to Fitness Trainer V2!\n\n"
         "Use the menu below to navigate or type direct inputs like:\n"
-        "• `132 Kilo` / `84.5 kg` / `132000 g`\n"
-        "• `20 laps` or `Twenty Laps`\n"
-        "• `My legs hurt` / `Meine Beine tun weh`"
+        "• 132 Kilo / 84.5 kg / 132000 g\n"
+        "• 20 laps or Twenty Laps\n"
+        "• My legs hurt / Meine Beine tun weh"
     )
-    await update.message.reply_text("Clearing old layout...", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text(welcome_text, reply_markup=build_main_menu(), parse_mode="Markdown")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-
-    if data == "menu_main":
-        await query.edit_message_text("Main Menu:", reply_markup=build_main_menu())
-    elif data == "menu_pool":
-        is_hol = context.user_data.get('pool_holiday', False)
-        is_rain = context.user_data.get('pool_rain', False)
-        stats = get_pool_occupancy_stats()
-        await query.edit_message_text(
-            f"🏊 **Pool Status & Conditions**\n\n{stats}",
-            reply_markup=build_pool_menu(is_hol, is_rain),
-            parse_mode="Markdown"
-        )
-    elif data == "pool_toggle_holiday":
-        context.user_data['pool_holiday'] = not context.user_data.get('pool_holiday', False)
-        is_hol = context.user_data['pool_holiday']
-        is_rain = context.user_data.get('pool_rain', False)
-        stats = get_pool_occupancy_stats()
-        await query.edit_message_text(
-            f"🏊 **Pool Status & Conditions**\n\n{stats}",
-            reply_markup=build_pool_menu(is_hol, is_rain),
-            parse_mode="Markdown"
-        )
-    elif data == "pool_toggle_rain":
-        context.user_data['pool_rain'] = not context.user_data.get('pool_rain', False)
-        is_hol = context.user_data.get('pool_holiday', False)
-        is_rain = context.user_data['pool_rain']
-        stats = get_pool_occupancy_stats()
-        await query.edit_message_text(
-            f"🏊 **Pool Status & Conditions**\n\n{stats}",
-            reply_markup=build_pool_menu(is_hol, is_rain),
-            parse_mode="Markdown"
-        )
-    elif data == "menu_sport":
-        await query.edit_message_text("🏋️ **Sport & Activity Tracking**", reply_markup=build_sport_menu(), parse_mode="Markdown")
-    elif data == "menu_nutrients":
-        await query.edit_message_text("☕ **Nutrients & Micro Toggle**\n\nRecord intake for healthy fats & magnesium synthesis:", reply_markup=build_nutrients_menu(), parse_mode="Markdown")
-    elif data == "nutrient_yes":
-        res = toggle_nutrient_log(1)
-        await query.edit_message_text(f"☕ Cargill Cacao / Cashews: **{res}**", reply_markup=build_nutrients_menu(), parse_mode="Markdown")
-    elif data == "nutrient_no":
-        res = toggle_nutrient_log(0)
-        await query.edit_message_text(f"☕ Cargill Cacao / Cashews: **{res}**", reply_markup=build_nutrients_menu(), parse_mode="Markdown")
-    elif data == "menu_stats":
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query("SELECT weight_kg, timestamp FROM weight_logs ORDER BY id DESC LIMIT 5", conn)
-        conn.close()
-        
-        history_text = ""
-        if not df.empty:
-            history_text = "\n\n**Recent Entries:**\n" + "\n".join([f"• `{row['weight_kg']} kg` ({row['timestamp'][:16]})" for _, row in df.iterrows()])
-            
-        await query.edit_message_text(
-            f"📊 **Stats & Measures**{history_text}\n\n_Type your weight anytime (e.g., '84.5 kg')._",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]]),
-            parse_mode="Markdown"
-        )
-    elif data == "menu_coach":
-        await query.edit_message_text("🤖 **Ollama AI Coach**\n\n_Coach module active. Video transcription pipeline available in Step 7._", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]]), parse_mode="Markdown")
-    else:
-        await query.edit_message_text(f"Action logged: `{data}`", reply_markup=build_main_menu(), parse_mode="Markdown")
+    await update.message.reply_text(welcome_text, reply_markup=build_main_menu())
 
 async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.strip().lower()
+    try:
+        text = update.message.text.strip()
+        text_lower = text.lower()
 
-    # 1. Kilogram Weight Logging
-    kg_pattern = r'([\d\.,\s]+)\s*(kg|kilos|kilo|kilogram|kilograms|weighed)'
-    kg_match = re.search(kg_pattern, text)
-    if kg_match:
-        try:
-            val = clean_number(kg_match.group(1))
-            daily_avg, ewma = save_weight_and_get_ewma(val)
-            reply = (
-                f"⚖️ **Weight Logged Successfully!**\n\n"
-                f"• Raw Input: `{val:.1f} kg`\n"
-                f"• Today's Average: `{daily_avg:.1f} kg`\n"
-                f"• **7-Day EWMA Trend:** `{ewma:.2f} kg`"
-            )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+        # --- Hauptmenü Navigation ---
+        if "back to main menu" in text_lower:
+            await update.message.reply_text("Main Menu:", reply_markup=build_main_menu())
             return
-        except ValueError:
-            pass
 
-    # 2. Gram Weight Logging -> Auto-converts to kg
-    gram_pattern = r'([\d\.,\s]+)\s*(g|gram|gramm|grams)'
-    gram_match = re.search(gram_pattern, text)
-    if gram_match:
-        try:
-            raw_grams = clean_number(gram_match.group(1))
-            val_kg = raw_grams / 1000.0
-            daily_avg, ewma = save_weight_and_get_ewma(val_kg)
-            reply = (
-                f"⚖️ **Weight Logged Successfully!** ({raw_grams:.0f} g converted)\n\n"
-                f"• Raw Input: `{val_kg:.1f} kg`\n"
-                f"• Today's Average: `{daily_avg:.1f} kg`\n"
-                f"• **7-Day EWMA Trend:** `{ewma:.2f} kg`"
+        if text_lower == "🏊 pool status":
+            is_hol = context.user_data.get('pool_holiday', False)
+            is_rain = context.user_data.get('pool_rain', False)
+            
+            status_overview = get_status_overview(is_hol, is_rain)
+            
+            msg = (
+                f"🏊 Pool Status & Conditions\n\n"
+                f"{status_overview}\n\n"
+                f"Pool status ready. No data recorded yet."
             )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            await update.message.reply_text(msg, reply_markup=build_pool_menu())
             return
-        except ValueError:
-            pass
 
-    # 3. Swim Laps Logging
-    swim_words_pattern = r'(' + '|'.join(WORD_TO_NUM.keys()) + r'|\d+)\s*(laps|lap|swam|bahnen|bahn)'
-    swim_match = re.search(swim_words_pattern, text)
-    if swim_match:
-        raw_val = swim_match.group(1)
-        laps_count = WORD_TO_NUM.get(raw_val, raw_val)
-        await update.message.reply_text(f"🏊 Parsed Swimming Entry: **{laps_count} laps**.", parse_mode="Markdown")
-        return
+        if "sport & training" in text_lower:
+            await update.message.reply_text("🏋️ Sport & Activity Tracking", reply_markup=build_sport_menu())
+            return
 
-    # 4. Soreness Detection
-    soreness_keywords = ['hurt', 'sore', 'weh', 'wehe', 'schmerz', 'muskelkater', 'neck', 'leg', 'arm', 'back']
-    if any(keyword in text for keyword in soreness_keywords):
-        await update.message.reply_text("🩹 **Soreness Recorded!** Universal Soreness Lock trigger activated.", parse_mode="Markdown")
-        return
+        # --- Public Holiday Toggle ---
+        if "public holiday" in text_lower:
+            current_state = context.user_data.get('pool_holiday', False)
+            new_state = not current_state
+            context.user_data['pool_holiday'] = new_state
+            
+            is_rain = context.user_data.get('pool_rain', False)
+            status_overview = get_status_overview(new_state, is_rain)
+            
+            msg = (
+                f"🌴 Public Holiday toggled.\n\n"
+                f"Current States:\n"
+                f"{status_overview}\n\n"
+                f"Pool status ready. No data recorded yet."
+            )
+            await update.message.reply_text(msg, reply_markup=build_pool_menu())
+            return
 
-    # Default fallback
-    await update.message.reply_text("Command not recognized.", reply_markup=build_main_menu())
+        # --- Raining Toggle ---
+        if "raining" in text_lower:
+            current_state = context.user_data.get('pool_rain', False)
+            new_state = not current_state
+            context.user_data['pool_rain'] = new_state
+            
+            is_hol = context.user_data.get('pool_holiday', False)
+            status_overview = get_status_overview(is_hol, new_state)
+            
+            msg = (
+                f"🌧️ Rain status toggled.\n\n"
+                f"Current States:\n"
+                f"{status_overview}\n\n"
+                f"Pool status ready. No data recorded yet."
+            )
+            await update.message.reply_text(msg, reply_markup=build_pool_menu())
+            return
+
+        # --- Pool Status Buttons Handling (Springt zum Main Menu zurück) ---
+        if "status: empty" in text_lower or text_lower == "empty":
+            is_hol = context.user_data.get('pool_holiday', False)
+            is_rain = context.user_data.get('pool_rain', False)
+            log_pool_status("Empty", is_hol, is_rain)
+            
+            status_overview = get_status_overview(is_hol, is_rain)
+            msg = (
+                f"🏊 Pool Status & Conditions\n\n"
+                f"Current States:\n"
+                f"{status_overview}\n\n"
+                f"Pool Logged as EMPTY."
+            )
+            await update.message.reply_text(msg, reply_markup=build_main_menu())
+            return
+
+        if "partially occupied" in text_lower:
+            is_hol = context.user_data.get('pool_holiday', False)
+            is_rain = context.user_data.get('pool_rain', False)
+            log_pool_status("Partially Occupied", is_hol, is_rain)
+            
+            status_overview = get_status_overview(is_hol, is_rain)
+            msg = (
+                f"🏊 Pool Status & Conditions\n\n"
+                f"Current States:\n"
+                f"{status_overview}\n\n"
+                f"Pool Logged as PARTIALLY OCCUPIED."
+            )
+            await update.message.reply_text(msg, reply_markup=build_main_menu())
+            return
+
+        if "status: full" in text_lower or text_lower == "full":
+            is_hol = context.user_data.get('pool_holiday', False)
+            is_rain = context.user_data.get('pool_rain', False)
+            log_pool_status("Full", is_hol, is_rain)
+            
+            status_overview = get_status_overview(is_hol, is_rain)
+            msg = (
+                f"🏊 Pool Status & Conditions\n\n"
+                f"Current States:\n"
+                f"{status_overview}\n\n"
+                f"Pool Logged as FULL."
+            )
+            await update.message.reply_text(msg, reply_markup=build_main_menu())
+            return
+
+        # --- Nutrients ---
+        if text_lower == "☕ nutrients":
+            await update.message.reply_text("☕ Nutrients & Micro Toggle\n\nRecord intake for healthy fats & magnesium synthesis:", reply_markup=build_nutrients_menu())
+            return
+
+        if "mark: cacao / cashews taken" in text_lower:
+            res = toggle_nutrient_log(1)
+            await update.message.reply_text(f"☕ Cargill Cacao / Cashews: {res}", reply_markup=build_main_menu())
+            return
+
+        if "mark: not taken today" in text_lower:
+            res = toggle_nutrient_log(0)
+            await update.message.reply_text(f"❌ Cargill Cacao / Cashews: {res}", reply_markup=build_main_menu())
+            return
+
+        if "stats, measures & goals" in text_lower:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql_query("SELECT weight_kg, timestamp FROM weight_logs ORDER BY id DESC LIMIT 5", conn)
+            conn.close()
+            
+            history_text = ""
+            if not df.empty:
+                history_text = "\n\nRecent Entries:\n" + "\n".join([f"• {row['weight_kg']} kg ({row['timestamp'][:16]})" for _, row in df.iterrows()])
+                
+            await update.message.reply_text(
+                f"📊 Stats & Measures{history_text}\n\nType your weight anytime (e.g., '84.5 kg').",
+                reply_markup=build_main_menu()
+            )
+            return
+
+        # --- Freitext Parsing ---
+
+        # 1. Kilogram Weight Logging
+        kg_pattern = r'([\d\.,\s]+)\s*(kg|kilos|kilo|kilogram|kilograms|weighed)'
+        kg_match = re.search(kg_pattern, text_lower)
+        if kg_match:
+            try:
+                val = clean_number(kg_match.group(1))
+                daily_avg, ewma = save_weight_and_get_ewma(val)
+                reply = (
+                    f"⚖️ Weight Logged Successfully!\n\n"
+                    f"• Raw Input: {val:.1f} kg\n"
+                    f"• Today's Average: {daily_avg:.1f} kg\n"
+                    f"• 7-Day EWMA Trend: {ewma:.2f} kg"
+                )
+                await update.message.reply_text(reply, reply_markup=build_main_menu())
+                return
+            except ValueError:
+                pass
+
+        # 2. Gram Weight Logging -> Auto-converts to kg
+        gram_pattern = r'([\d\.,\s]+)\s*(g|gram|gramm|grams)'
+        gram_match = re.search(gram_pattern, text_lower)
+        if gram_match:
+            try:
+                raw_grams = clean_number(gram_match.group(1))
+                val_kg = raw_grams / 1000.0
+                daily_avg, ewma = save_weight_and_get_ewma(val_kg)
+                reply = (
+                    f"⚖️ Weight Logged Successfully! ({raw_grams:.0f} g converted)\n\n"
+                    f"• Raw Input: {val_kg:.1f} kg\n"
+                    f"• Today's Average: {daily_avg:.1f} kg\n"
+                    f"• 7-Day EWMA Trend: {ewma:.2f} kg"
+                )
+                await update.message.reply_text(reply, reply_markup=build_main_menu())
+                return
+            except ValueError:
+                pass
+
+        # 3. Swim Laps Logging
+        swim_words_pattern = r'(' + '|'.join(WORD_TO_NUM.keys()) + r'|\d+)\s*(laps|lap|swam|bahnen|bahn)'
+        swim_match = re.search(swim_words_pattern, text_lower)
+        if swim_match:
+            raw_val = swim_match.group(1)
+            laps_count = WORD_TO_NUM.get(raw_val, raw_val)
+            await update.message.reply_text(f"🏊 Parsed Swimming Entry: {laps_count} laps.", reply_markup=build_main_menu())
+            return
+
+        # 4. Soreness Detection
+        soreness_keywords = ['hurt', 'sore', 'weh', 'wehe', 'schmerz', 'muskelkater', 'neck', 'leg', 'arm', 'back']
+        if any(keyword in text_lower for keyword in soreness_keywords):
+            await update.message.reply_text("🩹 Soreness Recorded! Universal Soreness Lock trigger activated.", reply_markup=build_main_menu())
+            return
+
+        # Default fallback
+        await update.message.reply_text("Command not recognized.", reply_markup=build_main_menu())
+    except Exception as err:
+        logger.error(f"Error in text_input_parser: {err}")
+        await update.message.reply_text(f"⚠️ Error processing command: {err}", reply_markup=build_main_menu())
 
 def main() -> None:
     init_db()
@@ -379,7 +443,6 @@ def main() -> None:
     app = Application.builder().token(token.strip()).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_parser))
 
     logger.info("Starting Fitness Trainer V2 Bot...")

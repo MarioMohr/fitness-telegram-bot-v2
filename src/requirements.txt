@@ -1,6 +1,6 @@
-python-telegram-bot==20.7
-pandas==2.2.0
-matplotlib==3.8.2
-python-dotenv==1.0.1
-dateparser==1.2.0
-
+python-telegram-bot
+pandas
+matplotlib
+python-dotenv
+dateparser
+pytz
