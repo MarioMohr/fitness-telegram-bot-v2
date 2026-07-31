@@ -1,10 +1,5 @@
 import os
-import re
-import sqlite3
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
-import pandas as pd
 from dotenv import load_dotenv
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -15,6 +10,19 @@ from telegram.ext import (
     filters,
 )
 
+from database import (
+    init_db,
+    log_pool_status,
+    save_weight_and_get_ewma,
+    toggle_nutrient_log,
+    get_recent_weight_logs,
+    get_local_now
+)
+from services.parser import (
+    parse_weight_input,
+    parse_soreness_input
+)
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,10 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-DB_PATH = "/app/data/fitness.db"
-
-# Read timezone from environment variable
-TZ_NAME = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
 
 # Read allowed Telegram User IDs
 ALLOWED_USERS_RAW = os.getenv("ALLOWED_USER_IDS", "")
@@ -41,14 +45,6 @@ def is_authorized(user_id: int) -> bool:
     if not ALLOWED_USER_IDS:
         return True
     return user_id in ALLOWED_USER_IDS
-
-def get_local_now() -> datetime:
-    """Returns current datetime in configured timezone."""
-    try:
-        return datetime.now(ZoneInfo(TZ_NAME))
-    except Exception as e:
-        logger.error(f"Error loading timezone {TZ_NAME}: {e}")
-        return datetime.now()
 
 def is_night_lock() -> bool:
     """Returns True if local time is between 22:00 and 07:00."""
@@ -71,127 +67,6 @@ def get_status_overview(is_hol: bool, is_rain: bool) -> str:
         f"🌧️ Raining: {rain_str}\n"
         f"🏊 7 AM to 10 PM: {hours_str}"
     )
-
-# --- Database Setup ---
-
-def init_db() -> None:
-    """Initializes SQLite database schemas."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS system_info (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('version', '3.0')")
-    cursor.execute("INSERT OR REPLACE INTO system_info (key, value) VALUES ('project_name', 'Fitness Container V3')")
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pool_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            occupancy TEXT NOT NULL,
-            is_holiday INTEGER DEFAULT 0,
-            is_raining INTEGER DEFAULT 0,
-            recommendation TEXT NOT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS weight_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            weight_kg REAL NOT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS body_measures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            chest_cm REAL,
-            arms_cm REAL,
-            waist_cm REAL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS nutrient_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date DATE NOT NULL,
-            cacao_cashews_taken INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
-    logger.info("Database schemas verified.")
-
-def log_pool_status(occupancy: str, is_holiday: bool, is_raining: bool) -> None:
-    """Saves pool log to DB."""
-    now_iso = get_local_now().isoformat()
-    hol_int = 1 if is_holiday else 0
-    rain_int = 1 if is_raining else 0
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO pool_logs (timestamp, occupancy, is_holiday, is_raining, recommendation) VALUES (?, ?, ?, ?, ?)",
-        (now_iso, occupancy, hol_int, rain_int, "")
-    )
-    conn.commit()
-    conn.close()
-
-def save_weight_and_get_ewma(weight_kg: float) -> tuple[float, float]:
-    """Saves weight and calculates 7-day EWMA trend."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO weight_logs (weight_kg) VALUES (?)", (weight_kg,))
-    conn.commit()
-
-    df = pd.read_sql_query("SELECT timestamp, weight_kg FROM weight_logs", conn)
-    conn.close()
-
-    df['date'] = pd.to_datetime(df['timestamp']).dt.date
-    daily_df = df.groupby('date')['weight_kg'].mean().reset_index()
-    daily_df = daily_df.sort_values('date')
-
-    daily_df['ewma_7d'] = daily_df['weight_kg'].ewm(span=7, adjust=False).mean()
-
-    latest_daily_avg = daily_df.iloc[-1]['weight_kg']
-    latest_ewma = daily_df.iloc[-1]['ewma_7d']
-
-    return float(latest_daily_avg), float(latest_ewma)
-
-def toggle_nutrient_log(status: int) -> str:
-    """Toggles daily nutrient intake record."""
-    today_str = get_local_now().date().isoformat()
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO nutrient_logs (date, cacao_cashews_taken) VALUES (?, ?)", (today_str, status))
-    conn.commit()
-    conn.close()
-    return "Taken" if status == 1 else "Not Taken"
-
-def clean_number(num_str: str) -> float:
-    """Cleans up numeric inputs for float conversion."""
-    num_str = num_str.strip()
-    if '.' in num_str and ',' in num_str:
-        num_str = num_str.replace('.', '').replace(',', '.')
-    elif '.' in num_str:
-        parts = num_str.split('.')
-        if len(parts[-1]) == 3 and len(parts) > 1:
-            num_str = num_str.replace('.', '')
-    elif ',' in num_str:
-        parts = num_str.split(',')
-        if len(parts[-1]) == 3 and len(parts) > 1:
-            num_str = num_str.replace(',', '')
-        else:
-            num_str = num_str.replace(',', '.')
-    return float(num_str)
 
 # --- Keyboards & Menus ---
 
@@ -290,7 +165,7 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(msg, reply_markup=build_pool_menu())
             return
 
-        # Pool Status Logging (Only allowed during opening hours 7 AM to 10 PM)
+        # Pool Status Logging
         if any(term in text_lower for term in ["status: empty", "status: leer", "status: partially occupied", "status: teilweise belegt", "status: full", "status: voll", "empty", "full"]):
             if is_night_lock():
                 await update.message.reply_text(
@@ -339,9 +214,7 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         # Stats & Weight Logs
         if "stats, measures & goals" in text_lower:
-            conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("SELECT weight_kg, timestamp FROM weight_logs ORDER BY id DESC LIMIT 5", conn)
-            conn.close()
+            df = get_recent_weight_logs(limit=5)
             
             history_text = ""
             if not df.empty:
@@ -353,66 +226,23 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
 
-        # Direct Weight Input (kg or g)
-        kg_pattern = r'([\d\.,\s]+)\s*(kg|kilos|kilo|kilogram|kilograms|weighed)'
-        kg_match = re.search(kg_pattern, text_lower)
-        if kg_match:
-            try:
-                val = clean_number(kg_match.group(1))
-                daily_avg, ewma = save_weight_and_get_ewma(val)
-                reply = (
-                    f"⚖️ Weight Logged Successfully!\n\n"
-                    f"• Measured Value: {val:.1f} kg\n"
-                    f"• Today's Average: {daily_avg:.1f} kg\n"
-                    f"• 7-Day EWMA Trend: {ewma:.2f} kg"
-                )
-                await update.message.reply_text(reply, reply_markup=build_main_menu())
-                return
-            except ValueError:
-                pass
+        # Direct Weight Input
+        parsed_weight = parse_weight_input(text_lower)
+        if parsed_weight is not None:
+            daily_avg, ewma = save_weight_and_get_ewma(parsed_weight)
+            reply = (
+                f"⚖️ Weight Logged Successfully!\n\n"
+                f"• Measured Value: {parsed_weight:.1f} kg\n"
+                f"• Today's Average: {daily_avg:.1f} kg\n"
+                f"• 7-Day EWMA Trend: {ewma:.2f} kg"
+            )
+            await update.message.reply_text(reply, reply_markup=build_main_menu())
+            return
 
-        gram_pattern = r'([\d\.,\s]+)\s*(g|gram|gramm|grams)'
-        gram_match = re.search(gram_pattern, text_lower)
-        if gram_match:
-            try:
-                raw_grams = clean_number(gram_match.group(1))
-                val_kg = raw_grams / 1000.0
-                daily_avg, ewma = save_weight_and_get_ewma(val_kg)
-                reply = (
-                    f"⚖️ Weight Logged Successfully! ({raw_grams:.0f} g converted)\n\n"
-                    f"• Measured Value: {val_kg:.1f} kg\n"
-                    f"• Today's Average: {daily_avg:.1f} kg\n"
-                    f"• 7-Day EWMA Trend: {ewma:.2f} kg"
-                )
-                await update.message.reply_text(reply, reply_markup=build_main_menu())
-                return
-            except ValueError:
-                pass
-
-        # Comprehensive Soreness & Pain Detection (EN & DE Slang included)
-        body_parts_map = {
-            'leg': 'legs', 'legs': 'legs', 'beine': 'legs', 'bein': 'legs',
-            'knee': 'knees', 'knees': 'knees', 'knie': 'knees',
-            'arm': 'arms', 'arms': 'arms', 'arme': 'arms', 'arm': 'arms',
-            'shoulder': 'shoulders', 'shoulders': 'shoulders', 'schulter': 'shoulders', 'schultern': 'shoulders',
-            'chest': 'chest', 'breast': 'chest', 'brust': 'chest', 'tits': 'chest', 'titties': 'chest', 'busen': 'chest', 'boobs': 'chest', 'man boobs': 'chest', 'männerbrust': 'chest',
-            'neck': 'neck', 'nacken': 'neck',
-            'stomach': 'abs/stomach', 'abs': 'abs/stomach', 'core': 'abs/stomach', 'bauch': 'abs/stomach',
-            'back': 'back', 'rücken': 'back',
-            'calf': 'calves', 'calves': 'calves', 'wade': 'calves', 'waden': 'calves',
-            'glute': 'glutes', 'glutes': 'glutes', 'butt': 'glutes', 'po': 'glutes', 'arsch': 'glutes', 'hintern': 'glutes'
-        }
-        
-        soreness_triggers = ['sore', 'hurt', 'hurts', 'pain', 'aching', 'stiff', 'weh', 'wehe', 'schmerz', 'schmerzen', 'muskelkater', 'steif']
-        
-        if any(trigger in text_lower for trigger in soreness_triggers):
-            detected_parts = []
-            for word, canonical_part in body_parts_map.items():
-                if word in text_lower and canonical_part not in detected_parts:
-                    detected_parts.append(canonical_part)
-            
+        # Direct Soreness Input
+        detected_parts = parse_soreness_input(text_lower)
+        if detected_parts is not None:
             part_str = ", ".join([p.upper() for p in detected_parts]) if detected_parts else "BODY PART"
-            
             await update.message.reply_text(
                 f"🩹 Soreness / Pain Recorded for: {part_str}.",
                 reply_markup=build_main_menu()
