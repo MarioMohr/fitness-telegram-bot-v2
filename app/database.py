@@ -69,6 +69,23 @@ def init_db() -> None:
         )
     ''')
 
+    # Neue Tabellen für Muskelkater und Verletzungen/Schmerzen
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS soreness_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            body_part TEXT NOT NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pain_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            body_part TEXT NOT NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
     logger.info("Database schemas verified.")
@@ -125,4 +142,13 @@ def get_recent_weight_logs(limit: int = 5) -> pd.DataFrame:
     df = pd.read_sql_query(f"SELECT weight_kg, timestamp FROM weight_logs ORDER BY id DESC LIMIT {limit}", conn)
     conn.close()
     return df
+
+def save_soreness_log(body_parts: list[str]) -> None:
+    """Saves soreness entry for listed body parts into DB."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    for part in body_parts:
+        cursor.execute("INSERT INTO soreness_logs (body_part) VALUES (?)", (part,))
+    conn.commit()
+    conn.close()
 

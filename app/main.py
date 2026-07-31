@@ -16,6 +16,7 @@ from database import (
     save_weight_and_get_ewma,
     toggle_nutrient_log,
     get_recent_weight_logs,
+    save_soreness_log,
     get_local_now
 )
 from services.parser import (
@@ -242,9 +243,10 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Direct Soreness Input
         detected_parts = parse_soreness_input(text_lower)
         if detected_parts is not None:
+            save_soreness_log(detected_parts)
             part_str = ", ".join([p.upper() for p in detected_parts]) if detected_parts else "BODY PART"
             await update.message.reply_text(
-                f"🩹 Soreness / Pain Recorded for: {part_str}.",
+                f"🩹 Soreness / Pain Recorded in Database for: {part_str}.",
                 reply_markup=build_main_menu()
             )
             return
