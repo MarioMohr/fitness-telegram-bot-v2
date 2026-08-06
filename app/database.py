@@ -57,9 +57,15 @@ def init_db() -> None:
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             chest_cm REAL,
             arms_cm REAL,
-            waist_cm REAL
+            waist_cm REAL,
+            hip_cm REAL
         )
     ''')
+
+    cursor.execute("PRAGMA table_info(body_measures)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'hip_cm' not in columns:
+        cursor.execute("ALTER TABLE body_measures ADD COLUMN hip_cm REAL")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS nutrient_logs (
@@ -69,7 +75,6 @@ def init_db() -> None:
         )
     ''')
 
-    # Neue Tabellen für Muskelkater und Verletzungen/Schmerzen
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS soreness_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,4 +156,50 @@ def save_soreness_log(body_parts: list[str]) -> None:
         cursor.execute("INSERT INTO soreness_logs (body_part) VALUES (?)", (part,))
     conn.commit()
     conn.close()
+
+def get_latest_body_measures() -> tuple[float | None, float | None, float | None, float | None]:
+    """Retrieves the latest recorded non-null body measurements."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT chest_cm FROM body_measures WHERE chest_cm IS NOT NULL ORDER BY id DESC LIMIT 1")
+    r_chest = cursor.fetchone()
+    
+    cursor.execute("SELECT arms_cm FROM body_measures WHERE arms_cm IS NOT NULL ORDER BY id DESC LIMIT 1")
+    r_arms = cursor.fetchone()
+    
+    cursor.execute("SELECT waist_cm FROM body_measures WHERE waist_cm IS NOT NULL ORDER BY id DESC LIMIT 1")
+    r_waist = cursor.fetchone()
+    
+    cursor.execute("SELECT hip_cm FROM body_measures WHERE hip_cm IS NOT NULL ORDER BY id DESC LIMIT 1")
+    r_hip = cursor.fetchone()
+    
+    conn.close()
+
+    c = r_chest[0] if r_chest else None
+    a = r_arms[0] if r_arms else None
+    w = r_waist[0] if r_waist else None
+    h = r_hip[0] if r_hip else None
+
+    return c, a, w, h
+
+def save_body_measures(chest_cm: float | None = None, arms_cm: float | None = None, waist_cm: float | None = None, hip_cm: float | None = None) -> tuple[float | None, float | None, float | None, float | None]:
+    """Saves body measurements in DB while inheriting previous non-null values."""
+    old_c, old_a, old_w, old_h = get_latest_body_measures()
+
+    new_c = chest_cm if chest_cm is not None else old_c
+    new_a = arms_cm if arms_cm is not None else old_a
+    new_w = waist_cm if waist_cm is not None else old_w
+    new_h = hip_cm if hip_cm is not None else old_h
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO body_measures (chest_cm, arms_cm, waist_cm, hip_cm) VALUES (?, ?, ?, ?)",
+        (new_c, new_a, new_w, new_h)
+    )
+    conn.commit()
+    conn.close()
+
+    return new_c, new_a, new_w, new_h
 
