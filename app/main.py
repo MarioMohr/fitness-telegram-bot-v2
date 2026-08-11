@@ -1,12 +1,11 @@
 import os
 import logging
 from dotenv import load_dotenv
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -27,6 +26,7 @@ from services.parser import (
     parse_soreness_input,
     parse_body_measures_input
 )
+from services.body_renderer import generate_body_measurements_image
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -87,49 +87,33 @@ def build_nutrients_menu() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def build_measures_inline_keyboard() -> InlineKeyboardMarkup:
+def build_measures_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [
-            InlineKeyboardButton("Chest -1", callback_data="adj_chest_-1"),
-            InlineKeyboardButton("Chest +1", callback_data="adj_chest_1"),
-        ],
-        [
-            InlineKeyboardButton("Arms -1", callback_data="adj_arms_-1"),
-            InlineKeyboardButton("Arms +1", callback_data="adj_arms_1"),
-        ],
-        [
-            InlineKeyboardButton("Waist -1", callback_data="adj_waist_-1"),
-            InlineKeyboardButton("Waist +1", callback_data="adj_waist_1"),
-        ],
-        [
-            InlineKeyboardButton("Hip -1", callback_data="adj_hip_-1"),
-            InlineKeyboardButton("Hip +1", callback_data="adj_hip_1"),
-        ]
+        [KeyboardButton("Chest -1"), KeyboardButton("Chest +1")],
+        [KeyboardButton("Arms -1"), KeyboardButton("Arms +1")],
+        [KeyboardButton("Waist -1"), KeyboardButton("Waist +1")],
+        [KeyboardButton("Hip -1"), KeyboardButton("Hip +1")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def generate_stats_summary_text() -> str:
-    df = get_recent_weight_logs(limit=5)
+def send_body_image_or_fallback():
+    df = get_recent_weight_logs(limit=1)
     chest, arms, waist, hip = get_latest_body_measures()
 
-    chest_str = f"{chest} cm" if chest is not None else "N/A"
-    arms_str = f"{arms} cm" if arms is not None else "N/A"
-    waist_str = f"{waist} cm" if waist is not None else "N/A"
-    hip_str = f"{hip} cm" if hip is not None else "N/A"
+    weight_val = str(int(round(df.iloc[0]['weight_kg']))) if not df.empty else "--"
+    chest_val = str(int(round(chest))) if chest is not None else "--"
+    arms_val = str(int(round(arms))) if arms is not None else "--"
+    waist_val = str(int(round(waist))) if waist is not None else "--"
+    hip_val = str(int(round(hip))) if hip is not None else "--"
 
-    weight_text = "No recent weight recorded."
-    if not df.empty:
-        weight_text = "\n".join([f"• {row['weight_kg']} kg ({row['timestamp'][:16]})" for _, row in df.iterrows()])
-
-    return (
-        "📊 Stats, Measures & Goals\n\n"
-        "📐 Current Body Measurements:\n"
-        f"• Chest: {chest_str}\n"
-        f"• Arms: {arms_str}\n"
-        f"• Waist: {waist_str}\n"
-        f"• Hip: {hip_str}\n\n"
-        f"⚖️ Recent Weight Entries:\n{weight_text}\n\n"
-        "Adjust measurements using the quick buttons below or type inputs directly anytime (e.g. 134 chest, 49 arms)."
+    return generate_body_measurements_image(
+        weight=weight_val,
+        height="175",
+        chest=chest_val,
+        arms=arms_val,
+        waist=waist_val,
+        hip=hip_val
     )
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -146,42 +130,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• 134 chest / 49 arms / 131 hip / 110 waist / one three one hip"
     )
     await update.message.reply_text(welcome_text, reply_markup=build_main_menu())
-
-async def measures_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    if not data.startswith("adj_"):
-        return
-
-    parts = data.split("_")
-    part_name = parts[1]
-    delta = float(parts[2])
-
-    chest, arms, waist, hip = get_latest_body_measures()
-
-    c = chest if part_name == "chest" else None
-    a = arms if part_name == "arms" else None
-    w = waist if part_name == "waist" else None
-    h = hip if part_name == "hip" else None
-
-    if part_name == "chest":
-        c = (chest or 100.0) + delta
-    elif part_name == "arms":
-        a = (arms or 35.0) + delta
-    elif part_name == "waist":
-        w = (waist or 90.0) + delta
-    elif part_name == "hip":
-        h = (hip or 100.0) + delta
-
-    save_body_measures(c, a, w, h)
-    
-    updated_text = generate_stats_summary_text()
-    await query.edit_message_text(
-        text=updated_text,
-        reply_markup=build_measures_inline_keyboard()
-    )
 
 async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -274,11 +222,55 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         if "stats, measures & goals" in text_lower:
-            summary_text = generate_stats_summary_text()
-            await update.message.reply_text(
-                summary_text,
-                reply_markup=build_measures_inline_keyboard()
-            )
+            image_path = send_body_image_or_fallback()
+            caption_text = "Adjust measurements using the menu below or type inputs directly anytime."
+            
+            if image_path and os.path.exists(image_path):
+                with open(image_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=caption_text,
+                        reply_markup=build_measures_menu()
+                    )
+            else:
+                await update.message.reply_text(
+                    "⚠️ Image file body_silhouette.png missing in app/data/",
+                    reply_markup=build_measures_menu()
+                )
+            return
+
+        measure_adjustments = {
+            "chest -1": ("chest", -1.0),
+            "chest +1": ("chest", 1.0),
+            "arms -1": ("arms", -1.0),
+            "arms +1": ("arms", 1.0),
+            "waist -1": ("waist", -1.0),
+            "waist +1": ("waist", 1.0),
+            "hip -1": ("hip", -1.0),
+            "hip +1": ("hip", 1.0),
+        }
+
+        if text_lower in measure_adjustments:
+            part_name, delta = measure_adjustments[text_lower]
+            chest, arms, waist, hip = get_latest_body_measures()
+
+            c = (chest or 100.0) + delta if part_name == "chest" else chest
+            a = (arms or 35.0) + delta if part_name == "arms" else arms
+            w = (waist or 90.0) + delta if part_name == "waist" else waist
+            h = (hip or 100.0) + delta if part_name == "hip" else hip
+
+            save_body_measures(c, a, w, h)
+
+            image_path = send_body_image_or_fallback()
+            caption_text = "Adjust measurements using the menu below or type inputs directly anytime."
+
+            if image_path and os.path.exists(image_path):
+                with open(image_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=caption_text,
+                        reply_markup=build_measures_menu()
+                    )
             return
 
         parsed_measures = parse_body_measures_input(text)
@@ -292,10 +284,10 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
             reply = (
                 "📐 Body Measurements Recorded!\n\n"
-                f"• Chest: {new_c if new_c is not None else 'N/A'} cm\n"
-                f"• Arms: {new_a if new_a is not None else 'N/A'} cm\n"
-                f"• Waist: {new_w if new_w is not None else 'N/A'} cm\n"
-                f"• Hip: {new_h if new_h is not None else 'N/A'} cm"
+                f"• Chest: {int(round(new_c)) if new_c is not None else 'N/A'} cm\n"
+                f"• Arms: {int(round(new_a)) if new_a is not None else 'N/A'} cm\n"
+                f"• Waist: {int(round(new_w)) if new_w is not None else 'N/A'} cm\n"
+                f"• Hip: {int(round(new_h)) if new_h is not None else 'N/A'} cm"
             )
             await update.message.reply_text(reply, reply_markup=build_main_menu())
             return
@@ -338,7 +330,6 @@ def main() -> None:
     app = Application.builder().token(token.strip()).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(measures_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_parser))
 
     logger.info("Starting Fitness Container V3...")
