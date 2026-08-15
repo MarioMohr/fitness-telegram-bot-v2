@@ -10,12 +10,11 @@ from telegram.ext import (
     filters,
 )
 
-from database import (
+from backend import (
     init_db,
     log_pool_status,
     save_weight_and_get_ewma,
     toggle_nutrient_log,
-    get_recent_weight_logs,
     save_soreness_log,
     save_body_measures,
     get_latest_body_measures,
@@ -26,7 +25,8 @@ from services.parser import (
     parse_soreness_input,
     parse_body_measures_input
 )
-from services.body_renderer import generate_body_measurements_image
+from services.measures_body import generate_body_measurements_image
+from services.stats_wma import generate_weight_chart
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -65,7 +65,7 @@ def get_status_overview(is_hol: bool, is_rain: bool) -> str:
 def build_main_menu() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("🏊 Pool Status"), KeyboardButton("☕ Nutrients")],
-        [KeyboardButton("📊 Stats, Measures & Goals")]
+        [KeyboardButton("📐 Measures"), KeyboardButton("⚖️ Weight Stats")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -98,18 +98,14 @@ def build_measures_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def send_body_image_or_fallback():
-    df = get_recent_weight_logs(limit=1)
     chest, arms, waist, hip = get_latest_body_measures()
 
-    weight_val = str(int(round(df.iloc[0]['weight_kg']))) if not df.empty else "--"
     chest_val = str(int(round(chest))) if chest is not None else "--"
     arms_val = str(int(round(arms))) if arms is not None else "--"
     waist_val = str(int(round(waist))) if waist is not None else "--"
     hip_val = str(int(round(hip))) if hip is not None else "--"
 
     return generate_body_measurements_image(
-        weight=weight_val,
-        height="175",
         chest=chest_val,
         arms=arms_val,
         waist=waist_val,
@@ -221,9 +217,9 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(f"❌ Cargill Cacao / Cashews: {res}", reply_markup=build_main_menu())
             return
 
-        if "stats, measures & goals" in text_lower:
+        if text_lower == "📐 measures":
             image_path = send_body_image_or_fallback()
-            caption_text = "Adjust measurements using the menu below or type inputs directly anytime."
+            caption_text = "📐 BODY MEASURES\n\nAdjust measurements using the menu below or type inputs directly anytime."
             
             if image_path and os.path.exists(image_path):
                 with open(image_path, 'rb') as photo:
@@ -234,8 +230,24 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     )
             else:
                 await update.message.reply_text(
-                    "⚠️ Image file body_silhouette.png missing in app/data/",
+                    caption_text,
                     reply_markup=build_measures_menu()
+                )
+            return
+
+        if text_lower == "⚖️ weight stats":
+            chart_path = generate_weight_chart()
+            if chart_path and os.path.exists(chart_path):
+                with open(chart_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption="⚖️ WEIGHT HISTORY & TREND (EWMA)",
+                        reply_markup=build_main_menu()
+                    )
+            else:
+                await update.message.reply_text(
+                    "⚖️ No weight history recorded yet. Enter your weight to generate the chart!",
+                    reply_markup=build_main_menu()
                 )
             return
 
@@ -254,15 +266,15 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             part_name, delta = measure_adjustments[text_lower]
             chest, arms, waist, hip = get_latest_body_measures()
 
-            c = (chest or 100.0) + delta if part_name == "chest" else chest
-            a = (arms or 35.0) + delta if part_name == "arms" else arms
-            w = (waist or 90.0) + delta if part_name == "waist" else waist
-            h = (hip or 100.0) + delta if part_name == "hip" else hip
+            c = (chest or 134.0) + delta if part_name == "chest" else chest
+            a = (arms or 49.0) + delta if part_name == "arms" else arms
+            w = (waist or 110.0) + delta if part_name == "waist" else waist
+            h = (hip or 131.0) + delta if part_name == "hip" else hip
 
             save_body_measures(c, a, w, h)
 
             image_path = send_body_image_or_fallback()
-            caption_text = "Adjust measurements using the menu below or type inputs directly anytime."
+            caption_text = "📐 BODY MEASURES\n\nAdjust measurements using the menu below or type inputs directly anytime."
 
             if image_path and os.path.exists(image_path):
                 with open(image_path, 'rb') as photo:
