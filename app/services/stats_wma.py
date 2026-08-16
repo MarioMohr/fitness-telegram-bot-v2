@@ -6,7 +6,7 @@ import matplotlib.dates as mdates
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "fitness.db")
 
-def generate_weight_chart(output_path="/tmp/weight_chart.png"):
+def generate_weight_chart(output_path="/tmp/weight_chart.png", target_weight=None):
     if not os.path.exists(DB_PATH):
         return None
 
@@ -30,6 +30,9 @@ def generate_weight_chart(output_path="/tmp/weight_chart.png"):
 
     ax.scatter(daily_df['date_logged'], daily_df['weight_kg'], color='#a855f7', alpha=0.6, label='Daily Logs', s=30)
     ax.plot(daily_df['date_logged'], daily_df['ewma'], color='#ec4899', linewidth=2.5, label='7-Day Trend')
+
+    if target_weight is not None:
+        ax.axhline(y=target_weight, color='#22c55e', linestyle='--', linewidth=1.5, label=f'Goal ({target_weight} kg)')
 
     ax.set_title("Weight History & Trend", fontsize=14, pad=15, color='#ffffff', fontweight='bold')
     ax.set_ylabel("Weight (kg)", fontsize=11, color='#cccccc')

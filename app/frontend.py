@@ -1,7 +1,12 @@
 import os
+import re
 import logging
 from dotenv import load_dotenv
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    KeyboardButton,
+    ReplyKeyboardMarkup
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,6 +32,7 @@ from services.parser import (
 )
 from services.measures_body import generate_body_measurements_image
 from services.stats_wma import generate_weight_chart
+from services.stats_goals import goals_service
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -97,6 +103,39 @@ def build_measures_menu() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def build_weight_menu(height_cm: int) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("🧮 Ideal Weight Calculator")],
+        [KeyboardButton(f"📏 Set Height ({height_cm} cm)")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def build_frame_menu() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("Slim")],
+        [KeyboardButton("Normal")],
+        [KeyboardButton("Heavy / Broad")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def build_look_menu() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("Athletic")],
+        [KeyboardButton("Fit / Normal")],
+        [KeyboardButton("Soft / Fluffy")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def build_confirm_target_menu(calculated_weight: float) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(f"✅ Accept {calculated_weight} kg")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 def send_body_image_or_fallback():
     chest, arms, waist, hip = get_latest_body_measures()
 
@@ -123,7 +162,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Use the menu below to navigate or type direct inputs like:\n"
         "• 132 kg / 84.5 kg\n"
         "• My legs are sore\n"
-        "• 134 chest / 49 arms / 131 hip / 110 waist / one three one hip"
+        "• 134 chest / 49 arms / 131 hip / 110 waist"
     )
     await update.message.reply_text(welcome_text, reply_markup=build_main_menu())
 
@@ -138,7 +177,109 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         text_lower = text.lower()
 
         if "back to main menu" in text_lower:
+            context.user_data.pop('awaiting_height', None)
+            context.user_data.pop('calc_step', None)
+            context.user_data.pop('pending_calculated_weight', None)
             await update.message.reply_text("Main Menu:", reply_markup=build_main_menu())
+            return
+
+        if context.user_data.get('awaiting_height'):
+            height_match = re.search(r'\b(1[4-9][0-9]|2[0-2][0-9])\b', text_lower)
+            if height_match:
+                new_height = int(height_match.group(1))
+                context.user_data['user_height'] = new_height
+                context.user_data['awaiting_height'] = False
+                await update.message.reply_text(
+                    f"📏 Height updated to **{new_height} cm**!",
+                    parse_mode="Markdown",
+                    reply_markup=build_weight_menu(new_height)
+                )
+                return
+            else:
+                await update.message.reply_text(
+                    "Please enter a valid height in cm (e.g. 175).",
+                    reply_markup=build_weight_menu(context.user_data.get('user_height', 175))
+                )
+                return
+
+        if text_lower == "🧮 ideal weight calculator":
+            context.user_data['calc_step'] = 'frame'
+            await update.message.reply_text(
+                "🧮 **Step 1:** Select your body frame type:",
+                parse_mode="Markdown",
+                reply_markup=build_frame_menu()
+            )
+            return
+
+        if context.user_data.get('calc_step') == 'frame' and text_lower in ["slim", "normal", "heavy / broad", "heavy"]:
+            frame_val = "heavy" if "heavy" in text_lower else text_lower
+            context.user_data['calc_frame'] = frame_val
+            context.user_data['calc_step'] = 'look'
+            await update.message.reply_text(
+                "🧮 **Step 2:** Select your desired target look:",
+                parse_mode="Markdown",
+                reply_markup=build_look_menu()
+            )
+            return
+
+        if context.user_data.get('calc_step') == 'look' and text_lower in ["athletic", "fit / normal", "soft / fluffy", "fit", "fluffy"]:
+            look_val = "fit" if "fit" in text_lower else ("fluffy" if "fluffy" in text_lower else text_lower)
+            frame_val = context.user_data.get('calc_frame', 'normal')
+            height_val = context.user_data.get('user_height', 175)
+
+            target_weight = goals_service.calculate_ideal_weight(height_val, frame_val, look_val)
+            context.user_data['pending_calculated_weight'] = target_weight
+            context.user_data['calc_step'] = 'confirm_target'
+
+            result_text = goals_service.format_calculation_result(height_val, frame_val, look_val, target_weight)
+            await update.message.reply_text(
+                result_text,
+                parse_mode="Markdown",
+                reply_markup=build_confirm_target_menu(target_weight)
+            )
+            return
+
+        if context.user_data.get('calc_step') == 'confirm_target':
+            pending_val = context.user_data.get('pending_calculated_weight')
+            target_w = None
+
+            if "accept" in text_lower or text_lower in ["yes", "ja", "ok"]:
+                target_w = pending_val
+            else:
+                weight_num_match = re.search(r'\b([3-9][0-9]|1[0-9][0-9])(?:[\.,][0-9])?\b', text_lower)
+                if weight_num_match:
+                    target_w = float(weight_num_match.group(0).replace(',', '.'))
+
+            if target_w is not None:
+                context.user_data['target_weight'] = target_w
+                context.user_data['calc_step'] = None
+                context.user_data.pop('pending_calculated_weight', None)
+
+                chart_path = generate_weight_chart(target_weight=target_w)
+                caption_msg = f"🎯 Target weight set to **{target_w} kg**!"
+
+                if chart_path and os.path.exists(chart_path):
+                    with open(chart_path, 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=caption_msg,
+                            parse_mode="Markdown",
+                            reply_markup=build_main_menu()
+                        )
+                else:
+                    await update.message.reply_text(
+                        caption_msg,
+                        parse_mode="Markdown",
+                        reply_markup=build_main_menu()
+                    )
+                return
+
+        if "set height" in text_lower:
+            context.user_data['awaiting_height'] = True
+            await update.message.reply_text(
+                "📏 Please type your height in centimeters (e.g. 175):",
+                reply_markup=build_weight_menu(context.user_data.get('user_height', 175))
+            )
             return
 
         if text_lower == "🏊 pool status":
@@ -236,18 +377,27 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         if text_lower == "⚖️ weight stats":
-            chart_path = generate_weight_chart()
+            target_w = context.user_data.get('target_weight', None)
+            current_h = context.user_data.get('user_height', 175)
+            chart_path = generate_weight_chart(target_weight=target_w)
+            
+            keyboard = build_weight_menu(current_h)
+            
+            caption_msg = "⚖️ WEIGHT HISTORY & TREND (EWMA)"
+            if target_w:
+                caption_msg += f"\n🎯 Current Target: {target_w} kg"
+
             if chart_path and os.path.exists(chart_path):
                 with open(chart_path, 'rb') as photo:
                     await update.message.reply_photo(
                         photo=photo,
-                        caption="⚖️ WEIGHT HISTORY & TREND (EWMA)",
-                        reply_markup=build_main_menu()
+                        caption=caption_msg,
+                        reply_markup=keyboard
                     )
             else:
                 await update.message.reply_text(
                     "⚖️ No weight history recorded yet. Enter your weight to generate the chart!",
-                    reply_markup=build_main_menu()
+                    reply_markup=keyboard
                 )
             return
 
