@@ -93,7 +93,6 @@ def build_nutrients_menu() -> ReplyKeyboardMarkup:
 def build_weight_menu(height_cm: int) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("🧮 Ideal Weight Calculator")],
-        [KeyboardButton(f"📏 Set Height ({height_cm} cm)")],
         [KeyboardButton("⬅️ Back to Main Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -130,16 +129,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     welcome_text = (
-        "Welcome to Fitness Trainer V2.1!\n\n"
+        "Welcome to Fitness Trainer V2.3!\n\n"
         "Use the menu below to navigate.\n\n"
-        "Update your weight by type direct inputs like:\n"
+        "Update your weight by typing direct inputs like:\n"
         "• 92 kg\n"
         "• 84.5 kg\n"
-        "• 11,500 gram\n\n"
+        "• 11,500 g\n\n"
         "To avoid working out specific body parts type:\n"
         "[Cramps | Pain | Acidity | Soreness]\n"
-        "And comine it with a body part like:\n"
-        "[Arms | Chest | Chest | Legs | Stomach | Glutes]"
+        "And combine it with a body part like:\n"
+        "[Arms | Chest | Legs | Stomach | Glutes]"
     )
     await update.message.reply_text(welcome_text, reply_markup=build_main_menu())
 
@@ -162,25 +161,6 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         if await handle_sizes_command(update, context):
             return
-
-        if context.user_data.get('awaiting_height'):
-            height_match = re.search(r'\b(1[4-9][0-9]|2[0-2][0-9])\b', text_lower)
-            if height_match:
-                new_height = int(height_match.group(1))
-                context.user_data['user_height'] = new_height
-                context.user_data['awaiting_height'] = False
-                await update.message.reply_text(
-                    f"📏 Height updated to **{new_height} cm**!",
-                    parse_mode="Markdown",
-                    reply_markup=build_weight_menu(new_height)
-                )
-                return
-            else:
-                await update.message.reply_text(
-                    "Please enter a valid height in cm (e.g. 175).",
-                    reply_markup=build_weight_menu(context.user_data.get('user_height', 175))
-                )
-                return
 
         if text_lower == "🧮 ideal weight calculator":
             context.user_data['calc_step'] = 'frame'
@@ -253,14 +233,6 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         reply_markup=build_main_menu()
                     )
                 return
-
-        if "set height" in text_lower:
-            context.user_data['awaiting_height'] = True
-            await update.message.reply_text(
-                "📏 Please type your height in centimeters (e.g. 175):",
-                reply_markup=build_weight_menu(context.user_data.get('user_height', 175))
-            )
-            return
 
         if text_lower == "🏊 pool status":
             is_hol = context.user_data.get('pool_holiday', False)

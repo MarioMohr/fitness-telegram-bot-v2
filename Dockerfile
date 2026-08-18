@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# System Pakete installieren
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -10,11 +9,15 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Python Abhängigkeiten
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Kopiere alle Quelldateien
 COPY app/ ./app/
+
+# Lösche einen eventuell lokal mitkopierten Datenordner im Image,
+# damit das Docker Volume die Kontrolle übernimmt
+RUN rm -rf /app/app/data
 
 CMD ["python", "app/frontend.py"]
 

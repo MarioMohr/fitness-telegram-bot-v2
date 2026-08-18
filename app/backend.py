@@ -114,6 +114,17 @@ def save_weight_and_get_ewma(weight: float):
 
     return daily_avg, latest_ewma
 
+def get_latest_weight():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT weight_kg FROM weight_logs ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row['weight_kg'] is not None:
+        return row['weight_kg']
+    return None
+
 def get_recent_weight_logs(limit: int = 14):
     conn = get_connection()
     df = pd.read_sql_query(f"SELECT date_logged, weight_kg FROM weight_logs ORDER BY id DESC LIMIT {limit}", conn)
@@ -153,10 +164,10 @@ def save_body_measures(chest=None, arms=None, waist=None, hip=None):
     cursor.execute("SELECT chest_cm, arms_cm, waist_cm, hip_cm FROM body_measures_logs ORDER BY id DESC LIMIT 1")
     row = cursor.fetchone()
 
-    last_chest = row['chest_cm'] if row and row['chest_cm'] is not None else 134.0
-    last_arms = row['arms_cm'] if row and row['arms_cm'] is not None else 49.0
-    last_waist = row['waist_cm'] if row and row['waist_cm'] is not None else 110.0
-    last_hip = row['hip_cm'] if row and row['hip_cm'] is not None else 131.0
+    last_chest = row['chest_cm'] if row else None
+    last_arms = row['arms_cm'] if row else None
+    last_waist = row['waist_cm'] if row else None
+    last_hip = row['hip_cm'] if row else None
 
     new_chest = chest if chest is not None else last_chest
     new_arms = arms if arms is not None else last_arms
@@ -180,9 +191,8 @@ def get_latest_body_measures():
     row = cursor.fetchone()
     conn.close()
 
-    if row and any(v is not None for v in [row['chest_cm'], row['arms_cm'], row['waist_cm'], row['hip_cm']]):
+    if row:
         return row['chest_cm'], row['arms_cm'], row['waist_cm'], row['hip_cm']
     
-    # Standardwerte initialisieren, falls Datenbank noch leer ist
-    return save_body_measures(134.0, 49.0, 151.0, 131.0)
+    return None, None, None, None
 
