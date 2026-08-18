@@ -7,6 +7,5 @@ services:
       - .env
     volumes:
       - ./app/data:/app/data
-      - ./app/config:/app/config
       - ./scripts:/app/scripts
 
