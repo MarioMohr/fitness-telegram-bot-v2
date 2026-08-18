@@ -3,9 +3,18 @@ from datetime import datetime, date
 import os
 import pytz
 import pandas as pd
+from dotenv import load_dotenv
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "fitness.db")
-TIMEZONE = pytz.timezone("Asia/Kuala_Lumpur")
+load_dotenv()
+
+ENV_DB_URL = os.getenv("DATABASE_URL", "")
+if "sqlite:///" in ENV_DB_URL:
+    DB_PATH = ENV_DB_URL.replace("sqlite:///", "")
+else:
+    DB_PATH = os.path.join(os.path.dirname(__file__), "data", "fitness.db")
+
+TIMEZONE_STR = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
+TIMEZONE = pytz.timezone(TIMEZONE_STR)
 
 def get_connection():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -75,8 +84,49 @@ def init_db():
         )
     """)
 
+    # Neue Tabelle für Einstellungen wie das Zielgewicht
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+def save_setting(key: str, value: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (key, str(value)))
+    conn.commit()
+    conn.close()
+
+def get_setting(key: str, default=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM user_settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return row['value']
+    return default
+
+def save_target_weight(weight: float):
+    save_setting("target_weight", str(weight))
+
+def get_target_weight():
+    val = get_setting("target_weight")
+    if val is not None:
+        try:
+            return float(val)
+        except ValueError:
+            return None
+    return None
 
 def log_pool_status(occupancy: str, is_holiday: bool, is_raining: bool):
     conn = get_connection()
