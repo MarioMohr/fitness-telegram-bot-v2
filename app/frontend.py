@@ -26,7 +26,7 @@ from services.parser import (
     parse_soreness_input
 )
 from services.sizes import handle_sizes_command
-from services.weight import handle_weight_command
+from services.weight import handle_weight_command, calculate_progress_summary
 from services.pool import handle_pool_command
 
 logging.basicConfig(
@@ -41,6 +41,8 @@ ALLOWED_USERS_RAW = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS = [
     int(uid.strip()) for uid in ALLOWED_USERS_RAW.split(",") if uid.strip().isdigit()
 ]
+
+APP_VERSION = os.getenv("APP_VERSION", "2.5")
 
 def is_authorized(user_id: int) -> bool:
     if not ALLOWED_USERS_RAW or not ALLOWED_USER_IDS:
@@ -69,7 +71,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     welcome_text = (
-        "Welcome to the Metabolic Sniper V2.4!\n\n"
+        f"Welcome to the Metabolic Sniper V{APP_VERSION}!\n\n"
         "To avoid working out specific body parts type:\n"
         "• Cramps\n"
         "• Pain\n"
@@ -80,7 +82,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• Legs\n"
         "• Stomach\n"
         "• Glutes\n\n"
-        "Use the menu on the botton to navigate."
+        "Use the menu on the bottom to navigate."
     )
     await update.message.reply_text(welcome_text, reply_markup=build_main_menu())
 
@@ -129,13 +131,16 @@ async def text_input_parser(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parsed_weight = parse_weight_input(text)
         if parsed_weight is not None:
             daily_avg, ewma = save_weight_and_get_ewma(parsed_weight)
+            progress_summary = calculate_progress_summary()
+            
             reply = (
-                f"⚖️ Weight Logged Successfully!\n\n"
-                f"• Measured Value: {parsed_weight:.1f} kg\n"
-                f"• Today's Average: {daily_avg:.1f} kg\n"
-                f"• 7-Day EWMA Trend: {ewma:.2f} kg"
+                f"⚖️ **Weight Logged Successfully!**\n\n"
+                f"• **Measured Value:** {parsed_weight:.1f} kg\n"
+                f"• **Today's Average:** {daily_avg:.1f} kg\n"
+                f"• **7-Day EWMA Trend:** {ewma:.2f} kg\n\n"
+                f"{progress_summary}"
             )
-            await update.message.reply_text(reply, reply_markup=build_main_menu())
+            await update.message.reply_text(reply, parse_mode="Markdown", reply_markup=build_main_menu())
             return
 
         detected_parts = parse_soreness_input(text)
@@ -166,7 +171,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_parser))
 
-    logger.info("Starting Fitness Container V2...")
+    logger.info(f"Starting Fitness Container V{APP_VERSION}...")
     app.run_polling()
 
 if __name__ == "__main__":

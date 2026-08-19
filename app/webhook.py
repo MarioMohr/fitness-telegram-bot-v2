@@ -3,6 +3,8 @@ import sqlite3
 import requests
 from fastapi import FastAPI, HTTPException, Request
 
+from services.weight import calculate_progress_summary
+
 app = FastAPI(title="Fitness Bot Webhook")
 
 DB_PATH = os.getenv("DB_PATH", "/app/data/fitness.db")
@@ -32,7 +34,7 @@ init_workout_db()
 
 def send_telegram_message(text: str):
     if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram Token oder Chat ID fehlt.")
+        print("Telegram Token or Chat ID missing.")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -43,7 +45,7 @@ def send_telegram_message(text: str):
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
-        print(f"Fehler beim Senden an Telegram: {e}")
+        print(f"Error sending to Telegram: {e}")
 
 def parse_qty(metric):
     if not metric:
@@ -71,7 +73,7 @@ async def receive_workout(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Ungültiges JSON Payload")
+        raise HTTPException(status_code=400, detail="Invalid JSON Payload")
 
     workouts = payload.get("data", {}).get("workouts", [])
     if not workouts:
@@ -100,18 +102,11 @@ async def receive_workout(request: Request):
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (workout_type, duration, active_cal, total_cal, avg_hr, weight, str(w)))
 
-        msg = (
-            f"🏋️‍♂️ *Neues Workout empfangen!*\n\n"
-            f"• *Typ:* {workout_type}\n"
-            f"• *Dauer:* {duration} Min\n"
-            f"• *Aktivkalorien:* {active_cal} kcal\n"
-            f"• *Gesamtkalorien:* {total_cal} kcal\n"
-            f"• *Ø Herzfrequenz:* {avg_hr} bpm\n"
-        )
-        send_telegram_message(msg)
+        progress_msg = calculate_progress_summary(active_cal, workout_type)
+        send_telegram_message(progress_msg)
 
     conn.commit()
     conn.close()
 
-    return {"status": "success", "message": "Workouts verarbeitet"}
+    return {"status": "success", "message": "Workouts processed"}
 

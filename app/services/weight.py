@@ -4,11 +4,19 @@ import sqlite3
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from datetime import datetime, timedelta
+import pytz
 from dotenv import load_dotenv
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from backend import save_target_weight, get_target_weight
+from backend import (
+    save_target_weight,
+    get_target_weight,
+    save_setting,
+    get_setting,
+    get_latest_weight
+)
 
 load_dotenv()
 
@@ -17,6 +25,9 @@ if "sqlite:///" in ENV_DB_URL:
     DB_PATH = ENV_DB_URL.replace("sqlite:///", "")
 else:
     DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "fitness.db")
+
+TIMEZONE_STR = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
+TIMEZONE = pytz.timezone(TIMEZONE_STR)
 
 class WeightService:
     def __init__(self):
@@ -56,7 +67,7 @@ class WeightService:
         max_range = round(calculated_weight + 2.5, 1)
 
         return (
-            "🧮 **Ideal Weight Calculation**\n\n"
+            "🧮 **Target Weight Calculation**\n\n"
             f"• **Height:** {height_cm} cm\n"
             f"• **Body Frame:** {frame_str}\n"
             f"• **Target Look:** {look_str}\n\n"
@@ -116,7 +127,7 @@ weight_service = WeightService()
 
 def build_weight_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🧮 Ideal Weight Calculator")],
+        [KeyboardButton("🎯 Set Target Weight"), KeyboardButton("⚡ Set Loss Speed")],
         [KeyboardButton("⬅️ Back to Main Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -146,6 +157,111 @@ def build_confirm_target_menu(calculated_weight: float) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def build_speed_menu() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("0.5 kg / week"), KeyboardButton("1.0 kg / week")],
+        [KeyboardButton("1.5 kg / week"), KeyboardButton("2.0 kg / week")],
+        [KeyboardButton("Custom Pace"), KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_weekly_burned_calories() -> float:
+    if not os.path.exists(DB_PATH):
+        return 0.0
+
+    now_local = datetime.now(TIMEZONE)
+    start_of_week = now_local - timedelta(days=now_local.weekday())
+    start_of_week_str = start_of_week.strftime("%Y-%m-%d 00:00:00")
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?",
+        (start_of_week_str,)
+    )
+    result = cur.fetchone()
+    conn.close()
+
+    if result and result[0] is not None:
+        return float(result[0])
+    return 0.0
+
+def get_today_burned_calories() -> float:
+    if not os.path.exists(DB_PATH):
+        return 0.0
+
+    now_local = datetime.now(TIMEZONE)
+    start_of_day_str = now_local.strftime("%Y-%m-%d 00:00:00")
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?",
+        (start_of_day_str,)
+    )
+    result = cur.fetchone()
+    conn.close()
+
+    if result and result[0] is not None:
+        return float(result[0])
+    return 0.0
+
+def calculate_progress_summary(active_calories: float = None, workout_type: str = None) -> str:
+    current_weight = get_latest_weight()
+    target_weight = get_target_weight()
+    speed_str = get_setting("weekly_loss_target_kg", "1.0")
+    
+    try:
+        weekly_target_kg = float(speed_str)
+    except ValueError:
+        weekly_target_kg = 1.0
+
+    weekly_calorie_goal = weekly_target_kg * 7700.0
+    daily_calorie_goal = weekly_calorie_goal / 7.0
+
+    burned_this_week = get_weekly_burned_calories()
+    burned_today = get_today_burned_calories()
+
+    remaining_week = max(0.0, weekly_calorie_goal - burned_this_week)
+    remaining_today = max(0.0, daily_calorie_goal - burned_today)
+
+    msg = ""
+    if workout_type and active_calories is not None:
+        msg += (
+            f"🏋️‍♂️ *New Workout Logged!*\n"
+            f"• *Type:* {workout_type}\n"
+            f"• *Workout Active Energy:* {int(active_calories)} kcal\n\n"
+        )
+
+    msg += (
+        f"⚡ *Calorie Targets Overview ({weekly_target_kg} kg/week goal)*\n\n"
+        f"📅 *Daily Target (00:00 to 24:00):*\n"
+        f"• *Goal:* {int(daily_calorie_goal)} kcal / day\n"
+        f"• *Burned Today:* {int(burned_today)} kcal\n"
+        f"• *Remaining Today:* {int(remaining_today)} kcal\n\n"
+        f"🗓️ *Weekly Target (Mon to Sun):*\n"
+        f"• *Goal:* {int(weekly_calorie_goal)} kcal / week\n"
+        f"• *Burned This Week:* {int(burned_this_week)} kcal\n"
+        f"• *Remaining This Week:* {int(remaining_week)} kcal\n"
+    )
+
+    if current_weight and target_weight:
+        diff = round(current_weight - target_weight, 1)
+        if diff <= 0:
+            msg += f"\n🎉 *Target weight of {target_weight} kg already reached!*"
+        else:
+            weeks_needed = round(diff / weekly_target_kg, 1)
+            days_needed = int(round(weeks_needed * 7))
+            
+            msg += (
+                f"\n📊 *Overall Weight Status:*\n"
+                f"• *Current Weight:* {current_weight} kg\n"
+                f"• *Target Weight:* {target_weight} kg ({diff} kg remaining)\n"
+                f"• *Estimated Time:* ~{weeks_needed} weeks ({days_needed} days)\n"
+            )
+
+    return msg
+
 async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TYPE, main_menu_builder) -> bool:
     text = update.message.text.strip()
     text_lower = text.lower()
@@ -158,18 +274,19 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
             if target_w is not None:
                 context.user_data['target_weight'] = target_w
 
+        speed_val = get_setting("weekly_loss_target_kg", "1.0")
         chart_path = weight_service.generate_weight_chart(target_weight=target_w)
         keyboard = build_weight_menu()
         
+        progress_summary = calculate_progress_summary()
+
         caption_msg = (
             "⚖️ **WEIGHT MODULE**\n\n"
             "Log your weight anytime by sending direct inputs like:\n"
             "• 92 KG\n"
-            "• 84.5 kg\n"
-            "• 11,500 g\n"
+            "• 84.5 kg\n\n"
+            f"{progress_summary}"
         )
-        if target_w:
-            caption_msg += f"\n🎯 **Current Target:** {target_w} kg"
 
         if chart_path and os.path.exists(chart_path):
             with open(chart_path, 'rb') as photo:
@@ -181,13 +298,13 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
                 )
         else:
             await update.message.reply_text(
-                f"{caption_msg}\n\n*No history recorded yet.*",
+                caption_msg,
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
         return True
 
-    if text_lower == "🧮 ideal weight calculator":
+    if text_lower in ["🎯 set target weight", "set target weight"]:
         context.user_data['calc_step'] = 'frame'
         await update.message.reply_text(
             "🧮 **Step 1:** Select your body frame type:",
@@ -195,6 +312,55 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=build_frame_menu()
         )
         return True
+
+    if text_lower == "⚡ set loss speed":
+        context.user_data['calc_step'] = 'select_speed'
+        await update.message.reply_text(
+            "⚡ **Select Weight Loss Speed Target**\n\nHow many kg do you want to lose per week?",
+            parse_mode="Markdown",
+            reply_markup=build_speed_menu()
+        )
+        return True
+
+    if calc_step == 'select_speed':
+        speed_mapping = {
+            "0.5 kg / week": 0.5,
+            "1.0 kg / week": 1.0,
+            "1.5 kg / week": 1.5,
+            "2.0 kg / week": 2.0
+        }
+        
+        if text_lower in [k.lower() for k in speed_mapping.keys()]:
+            selected_val = next(v for k, v in speed_mapping.items() if k.lower() == text_lower)
+            save_setting("weekly_loss_target_kg", str(selected_val))
+            context.user_data['calc_step'] = None
+            await update.message.reply_text(
+                f"✅ Weight loss goal set to **{selected_val} kg per week**!",
+                parse_mode="Markdown",
+                reply_markup=build_weight_menu()
+            )
+            return True
+        elif text_lower == "custom pace":
+            context.user_data['calc_step'] = 'awaiting_custom_speed'
+            await update.message.reply_text("Please enter your weekly goal in kg (e.g., 2.5 kg):")
+            return True
+
+    if calc_step == 'awaiting_custom_speed':
+        val_match = re.search(r'\b([0-9](?:[\.,][0-9])?)\b', text_lower)
+        if val_match:
+            custom_speed = float(val_match.group(0).replace(',', '.'))
+            save_setting("weekly_loss_target_kg", str(custom_speed))
+            context.user_data['calc_step'] = None
+            await update.message.reply_text(
+                f"✅ Custom weight loss goal set to **{custom_speed} kg per week**!",
+                parse_mode="Markdown",
+                reply_markup=build_weight_menu()
+            )
+            return True
+        else:
+            await update.message.reply_text("Invalid input.", reply_markup=build_weight_menu())
+            context.user_data['calc_step'] = None
+            return True
 
     if calc_step == 'frame' and text_lower in ["slim", "normal", "heavy / broad", "heavy"]:
         frame_val = "heavy" if "heavy" in text_lower else text_lower
@@ -253,48 +419,15 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
             return True
 
         if text_lower in ["no", "nein"]:
-            context.user_data['calc_step'] = 'awaiting_custom_target'
-            await update.message.reply_text(
-                "Please enter your desired target weight in kg (e.g., 80 kg):"
-            )
+            context.user_data['calc_step'] = None
+            context.user_data.pop('pending_calculated_weight', None)
+            await update.message.reply_text("Process cancelled.", reply_markup=main_menu_builder())
             return True
 
         context.user_data['calc_step'] = None
         context.user_data.pop('pending_calculated_weight', None)
         await update.message.reply_text("Process cancelled.", reply_markup=main_menu_builder())
         return True
-
-    if calc_step == 'awaiting_custom_target':
-        weight_match = re.search(r'\b([3-9][0-9]|1[0-9][0-9])(?:[\.,][0-9])?\b', text_lower)
-        if weight_match:
-            custom_target = float(weight_match.group(0).replace(',', '.'))
-            context.user_data['target_weight'] = custom_target
-            save_target_weight(custom_target)
-            context.user_data['calc_step'] = None
-            context.user_data.pop('pending_calculated_weight', None)
-
-            chart_path = weight_service.generate_weight_chart(target_weight=custom_target)
-            caption_msg = f"🎯 Target weight set to **{custom_target} kg**!"
-
-            if chart_path and os.path.exists(chart_path):
-                with open(chart_path, 'rb') as photo:
-                    await update.message.reply_photo(
-                        photo=photo,
-                        caption=caption_msg,
-                        parse_mode="Markdown",
-                        reply_markup=main_menu_builder()
-                    )
-            else:
-                await update.message.reply_text(
-                    caption_msg,
-                    parse_mode="Markdown",
-                    reply_markup=main_menu_builder()
-                )
-            return True
-        else:
-            await update.message.reply_text("Invalid input. Target weight setting cancelled.", reply_markup=main_menu_builder())
-            context.user_data['calc_step'] = None
-            return True
 
     return False
 
