@@ -3,6 +3,8 @@ services:
     build: .
     container_name: fitness_telegram_bot_v2
     restart: unless-stopped
+    ports:
+      - "8888:8888"
     env_file:
       - .env
     volumes:

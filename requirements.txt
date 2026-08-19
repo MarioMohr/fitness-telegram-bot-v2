@@ -5,4 +5,7 @@ python-dotenv
 dateparser
 pytz
 Pillow
+fastapi
+uvicorn
+requests
 

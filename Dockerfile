@@ -1,23 +1,20 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    sqlite3 \
-    fonts-dejavu \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
-COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiere alle Quelldateien
-COPY app/ ./app/
+COPY app /app/app
 
-# Lösche einen eventuell lokal mitkopierten Datenordner im Image,
-# damit das Docker Volume die Kontrolle übernimmt
-RUN rm -rf /app/app/data
+ENV PYTHONPATH=/app/app
 
-CMD ["python", "app/frontend.py"]
+EXPOSE 8888
+
+CMD ["sh", "-c", "uvicorn app.webhook:app --host 0.0.0.0 --port 8888 & python app/frontend.py"]
 
