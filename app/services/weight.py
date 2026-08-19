@@ -24,7 +24,7 @@ ENV_DB_URL = os.getenv("DATABASE_URL", "")
 if "sqlite:///" in ENV_DB_URL:
     DB_PATH = ENV_DB_URL.replace("sqlite:///", "")
 else:
-    DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "fitness.db")
+    DB_PATH = os.getenv("DB_PATH", "/app/data/fitness.db")
 
 TIMEZONE_STR = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
 TIMEZONE = pytz.timezone(TIMEZONE_STR)
@@ -165,48 +165,66 @@ def build_speed_menu() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def get_today_burned_calories() -> float:
+    if not os.path.exists(DB_PATH):
+        return 0.0
+
+    now_local = datetime.now(TIMEZONE)
+    today_str = now_local.strftime("%Y-%m-%d")
+    start_of_day_str = now_local.strftime("%Y-%m-%d 00:00:00")
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("SELECT active_calories FROM daily_energy_logs WHERE date_str = ?", (today_str,))
+    row = cur.fetchone()
+
+    total_active = 0.0
+    if row and row[0] is not None:
+        total_active = float(row[0])
+    else:
+        cur.execute("SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?", (start_of_day_str,))
+        w_row = cur.fetchone()
+        if w_row and w_row[0] is not None:
+            total_active = float(w_row[0])
+
+    conn.close()
+    return total_active
+
 def get_weekly_burned_calories() -> float:
     if not os.path.exists(DB_PATH):
         return 0.0
 
     now_local = datetime.now(TIMEZONE)
     start_of_week = now_local - timedelta(days=now_local.weekday())
-    start_of_week_str = start_of_week.strftime("%Y-%m-%d 00:00:00")
-
+    
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute(
-        "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?",
-        (start_of_week_str,)
-    )
-    result = cur.fetchone()
+
+    weekly_total = 0.0
+    for i in range(7):
+        day_date = start_of_week + timedelta(days=i)
+        day_str = day_date.strftime("%Y-%m-%d")
+
+        cur.execute("SELECT active_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            weekly_total += float(row[0])
+        else:
+            day_start = day_date.strftime("%Y-%m-%d 00:00:00")
+            day_end = day_date.strftime("%Y-%m-%d 23:59:59")
+            cur.execute(
+                "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ? AND timestamp <= ?",
+                (day_start, day_end)
+            )
+            w_row = cur.fetchone()
+            if w_row and w_row[0] is not None:
+                weekly_total += float(w_row[0])
+
     conn.close()
+    return weekly_total
 
-    if result and result[0] is not None:
-        return float(result[0])
-    return 0.0
-
-def get_today_burned_calories() -> float:
-    if not os.path.exists(DB_PATH):
-        return 0.0
-
-    now_local = datetime.now(TIMEZONE)
-    start_of_day_str = now_local.strftime("%Y-%m-%d 00:00:00")
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?",
-        (start_of_day_str,)
-    )
-    result = cur.fetchone()
-    conn.close()
-
-    if result and result[0] is not None:
-        return float(result[0])
-    return 0.0
-
-def calculate_progress_summary(active_calories: float = None, workout_type: str = None) -> str:
+def calculate_progress_summary() -> str:
     current_weight = get_latest_weight()
     target_weight = get_target_weight()
     speed_str = get_setting("weekly_loss_target_kg", "1.0")
@@ -225,39 +243,31 @@ def calculate_progress_summary(active_calories: float = None, workout_type: str 
     remaining_week = max(0.0, weekly_calorie_goal - burned_this_week)
     remaining_today = max(0.0, daily_calorie_goal - burned_today)
 
-    msg = ""
-    if workout_type and active_calories is not None:
-        msg += (
-            f"🏋️‍♂️ *New Workout Logged!*\n"
-            f"• *Type:* {workout_type}\n"
-            f"• *Workout Active Energy:* {int(active_calories)} kcal\n\n"
-        )
-
-    msg += (
-        f"⚡ *Calorie Targets Overview ({weekly_target_kg} kg/week goal)*\n\n"
-        f"📅 *Daily Target (00:00 to 24:00):*\n"
-        f"• *Goal:* {int(daily_calorie_goal)} kcal / day\n"
-        f"• *Burned Today:* {int(burned_today)} kcal\n"
-        f"• *Remaining Today:* {int(remaining_today)} kcal\n\n"
-        f"🗓️ *Weekly Target (Mon to Sun):*\n"
-        f"• *Goal:* {int(weekly_calorie_goal)} kcal / week\n"
-        f"• *Burned This Week:* {int(burned_this_week)} kcal\n"
-        f"• *Remaining This Week:* {int(remaining_week)} kcal\n"
+    msg = (
+        f"⚡ **Calorie Targets Overview** ({weekly_target_kg} kg/week goal)\n\n"
+        f"📅 **Daily Target:**\n"
+        f"• **Goal:** {int(daily_calorie_goal)} kcal / day\n"
+        f"• **Burned Today:** {int(burned_today)} kcal\n"
+        f"• **Remaining Today:** {int(remaining_today)} kcal\n\n"
+        f"🗓️ **Weekly Target:**\n"
+        f"• **Goal:** {int(weekly_calorie_goal)} kcal / week\n"
+        f"• **Burned This Week:** {int(burned_this_week)} kcal\n"
+        f"• **Remaining This Week:** {int(remaining_week)} kcal\n"
     )
 
     if current_weight and target_weight:
         diff = round(current_weight - target_weight, 1)
         if diff <= 0:
-            msg += f"\n🎉 *Target weight of {target_weight} kg already reached!*"
+            msg += f"\n🎉 **Target weight of {target_weight} kg already reached!**"
         else:
             weeks_needed = round(diff / weekly_target_kg, 1)
             days_needed = int(round(weeks_needed * 7))
             
             msg += (
-                f"\n📊 *Overall Weight Status:*\n"
-                f"• *Current Weight:* {current_weight} kg\n"
-                f"• *Target Weight:* {target_weight} kg ({diff} kg remaining)\n"
-                f"• *Estimated Time:* ~{weeks_needed} weeks ({days_needed} days)\n"
+                f"\n📊 **Overall Weight Status:**\n"
+                f"• **Current Weight:** {current_weight} kg\n"
+                f"• **Target Weight:** {target_weight} kg ({diff} kg remaining)\n"
+                f"• **Estimated Time:** ~{weeks_needed} weeks ({days_needed} days)\n"
             )
 
     return msg
@@ -274,7 +284,6 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
             if target_w is not None:
                 context.user_data['target_weight'] = target_w
 
-        speed_val = get_setting("weekly_loss_target_kg", "1.0")
         chart_path = weight_service.generate_weight_chart(target_weight=target_w)
         keyboard = build_weight_menu()
         
