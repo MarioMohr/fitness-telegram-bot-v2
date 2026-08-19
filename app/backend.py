@@ -84,7 +84,6 @@ def init_db():
         )
     """)
 
-    # Neue Tabelle für Einstellungen wie das Zielgewicht
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_settings (
             key TEXT PRIMARY KEY,
@@ -131,13 +130,62 @@ def get_target_weight():
 def log_pool_status(occupancy: str, is_holiday: bool, is_raining: bool):
     conn = get_connection()
     cursor = conn.cursor()
-    now_str = get_local_now().isoformat()
+    now_utc_str = datetime.now(pytz.utc).isoformat()
     cursor.execute("""
         INSERT INTO pool_logs (timestamp, occupancy, is_holiday, is_raining)
         VALUES (?, ?, ?, ?)
-    """, (now_str, occupancy, int(is_holiday), int(is_raining)))
+    """, (now_utc_str, occupancy, int(is_holiday), int(is_raining)))
     conn.commit()
     conn.close()
+
+def get_pool_best_times() -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT timestamp, occupancy FROM pool_logs")
+    rows = cursor.fetchall()
+    conn.close()
+
+    days_map = {
+        0: "Monday", 1: "Tuesday", 2: "Wednesday",
+        3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"
+    }
+
+    stats = {i: {"total": 0, "empty_hours": {}} for i in range(7)}
+
+    for row in rows:
+        ts_str = row['timestamp']
+        occ = row['occupancy'].lower()
+        try:
+            dt_utc = datetime.fromisoformat(ts_str)
+            if dt_utc.tzinfo is None:
+                dt_utc = pytz.utc.localize(dt_utc)
+            dt_local = dt_utc.astimezone(TIMEZONE)
+        except Exception:
+            continue
+
+        weekday = dt_local.weekday()
+        stats[weekday]["total"] += 1
+
+        if "empty" in occ:
+            hour_str = dt_local.strftime("%H:00")
+            stats[weekday]["empty_hours"][hour_str] = stats[weekday]["empty_hours"].get(hour_str, 0) + 1
+
+    result_lines = []
+    for day_idx in range(7):
+        day_name = days_map[day_idx]
+        total_count = stats[day_idx]["total"]
+        empty_hours = stats[day_idx]["empty_hours"]
+
+        if empty_hours:
+            sorted_hours = sorted(empty_hours.items(), key=lambda x: x[1], reverse=True)
+            top_hours = [h[0] for h in sorted_hours[:2]]
+            best_str = ", ".join(top_hours)
+        else:
+            best_str = "No empty logs"
+
+        result_lines.append(f"• {day_name} ({total_count}): {best_str}")
+
+    return "\n".join(result_lines)
 
 def save_weight_and_get_ewma(weight: float):
     conn = get_connection()
