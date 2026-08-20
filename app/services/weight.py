@@ -171,7 +171,6 @@ def get_today_burned_calories() -> float:
 
     now_local = datetime.now(TIMEZONE)
     today_str = now_local.strftime("%Y-%m-%d")
-    start_of_day_str = now_local.strftime("%Y-%m-%d 00:00:00")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -180,10 +179,15 @@ def get_today_burned_calories() -> float:
     row = cur.fetchone()
 
     total_active = 0.0
-    if row and row[0] is not None:
+    if row and row[0] is not None and float(row[0]) > 0.0:
         total_active = float(row[0])
     else:
-        cur.execute("SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ?", (start_of_day_str,))
+        day_start = f"{today_str} 00:00:00"
+        day_end = f"{today_str} 23:59:59"
+        cur.execute(
+            "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ? AND timestamp <= ?",
+            (day_start, day_end)
+        )
         w_row = cur.fetchone()
         if w_row and w_row[0] is not None:
             total_active = float(w_row[0])
@@ -196,8 +200,8 @@ def get_weekly_burned_calories() -> float:
         return 0.0
 
     now_local = datetime.now(TIMEZONE)
-    start_of_week = now_local - timedelta(days=now_local.weekday())
-    
+    start_of_week = (now_local - timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -208,11 +212,12 @@ def get_weekly_burned_calories() -> float:
 
         cur.execute("SELECT active_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
         row = cur.fetchone()
-        if row and row[0] is not None:
+
+        if row and row[0] is not None and float(row[0]) > 0.0:
             weekly_total += float(row[0])
         else:
-            day_start = day_date.strftime("%Y-%m-%d 00:00:00")
-            day_end = day_date.strftime("%Y-%m-%d 23:59:59")
+            day_start = f"{day_str} 00:00:00"
+            day_end = f"{day_str} 23:59:59"
             cur.execute(
                 "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ? AND timestamp <= ?",
                 (day_start, day_end)
