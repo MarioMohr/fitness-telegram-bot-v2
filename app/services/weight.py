@@ -175,25 +175,17 @@ def get_today_burned_calories() -> float:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    cur.execute("SELECT active_calories FROM daily_energy_logs WHERE date_str = ?", (today_str,))
+    cur.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (today_str,))
     row = cur.fetchone()
 
-    total_active = 0.0
-    if row and row[0] is not None and float(row[0]) > 0.0:
-        total_active = float(row[0])
-    else:
-        day_start = f"{today_str} 00:00:00"
-        day_end = f"{today_str} 23:59:59"
-        cur.execute(
-            "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ? AND timestamp <= ?",
-            (day_start, day_end)
-        )
-        w_row = cur.fetchone()
-        if w_row and w_row[0] is not None:
-            total_active = float(w_row[0])
+    total_cals = 0.0
+    if row:
+        active = float(row[0]) if row[0] is not None else 0.0
+        resting = float(row[1]) if row[1] is not None else 0.0
+        total_cals = active + resting
 
     conn.close()
-    return total_active
+    return total_cals
 
 def get_weekly_burned_calories() -> float:
     if not os.path.exists(DB_PATH):
@@ -210,21 +202,13 @@ def get_weekly_burned_calories() -> float:
         day_date = start_of_week + timedelta(days=i)
         day_str = day_date.strftime("%Y-%m-%d")
 
-        cur.execute("SELECT active_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
+        cur.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
         row = cur.fetchone()
 
-        if row and row[0] is not None and float(row[0]) > 0.0:
-            weekly_total += float(row[0])
-        else:
-            day_start = f"{day_str} 00:00:00"
-            day_end = f"{day_str} 23:59:59"
-            cur.execute(
-                "SELECT SUM(active_calories) FROM workout_logs WHERE timestamp >= ? AND timestamp <= ?",
-                (day_start, day_end)
-            )
-            w_row = cur.fetchone()
-            if w_row and w_row[0] is not None:
-                weekly_total += float(w_row[0])
+        if row:
+            active = float(row[0]) if row[0] is not None else 0.0
+            resting = float(row[1]) if row[1] is not None else 0.0
+            weekly_total += (active + resting)
 
     conn.close()
     return weekly_total

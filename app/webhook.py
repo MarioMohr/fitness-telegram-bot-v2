@@ -36,15 +36,6 @@ def init_db():
         )
     """)
     
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS workout_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            workout_type TEXT,
-            active_calories REAL
-        )
-    """)
-    
     conn.commit()
     conn.close()
 
@@ -94,7 +85,6 @@ def extract_calories_from_payload(payload: dict):
     return round(active_cals, 1), round(resting_cals, 1)
 
 @app.post("/webhook")
-@app.post("/webhook/workout")
 async def handle_webhook(request: Request):
     try:
         data = await request.json()
@@ -103,7 +93,6 @@ async def handle_webhook(request: Request):
 
     now_local = datetime.now(TIMEZONE)
     today_str = now_local.strftime("%Y-%m-%d")
-    timestamp_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
 
     active_cals, resting_cals = extract_calories_from_payload(data)
 
@@ -115,23 +104,14 @@ async def handle_webhook(request: Request):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    payload_type = data.get("type", "daily_summary")
-
-    if payload_type == "workout":
-        workout_type = data.get("workout_type", "Workout")
-        cur.execute(
-            "INSERT INTO workout_logs (timestamp, workout_type, active_calories) VALUES (?, ?, ?)",
-            (timestamp_str, workout_type, active_cals)
-        )
-    else:
-        cur.execute("""
-            INSERT INTO daily_energy_logs (date_str, active_calories, resting_calories, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(date_str) DO UPDATE SET
-                active_calories = excluded.active_calories,
-                resting_calories = excluded.resting_calories,
-                updated_at = CURRENT_TIMESTAMP
-        """, (today_str, active_cals, resting_cals))
+    cur.execute("""
+        INSERT INTO daily_energy_logs (date_str, active_calories, resting_calories, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(date_str) DO UPDATE SET
+            active_calories = excluded.active_calories,
+            resting_calories = excluded.resting_calories,
+            updated_at = CURRENT_TIMESTAMP
+    """, (today_str, active_cals, resting_cals))
 
     conn.commit()
     conn.close()
