@@ -1,6 +1,5 @@
 import os
 import re
-import sqlite3
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -15,16 +14,15 @@ from backend import (
     get_target_weight,
     save_setting,
     get_setting,
-    get_latest_weight
+    get_latest_weight,
+    get_average_daily_burned_calories,
+    get_today_burned_calories_from_db,
+    get_weekly_burned_calories_from_db,
+    get_weight_logs_df,
+    get_energy_logs_df
 )
 
 load_dotenv()
-
-ENV_DB_URL = os.getenv("DATABASE_URL", "")
-if "sqlite:///" in ENV_DB_URL:
-    DB_PATH = ENV_DB_URL.replace("sqlite:///", "")
-else:
-    DB_PATH = os.getenv("DB_PATH", "/app/data/fitness.db")
 
 TIMEZONE_STR = os.getenv("TIMEZONE", "Asia/Kuala_Lumpur")
 TIMEZONE = pytz.timezone(TIMEZONE_STR)
@@ -77,12 +75,7 @@ class WeightService:
         )
 
     def generate_weight_chart(self, output_path="/tmp/weight_chart.png", target_weight=None):
-        if not os.path.exists(DB_PATH):
-            return None
-
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query("SELECT timestamp, date_logged, weight_kg FROM weight_logs ORDER BY timestamp ASC", conn)
-        conn.close()
+        df = get_weight_logs_df()
 
         if df.empty:
             return None
@@ -124,16 +117,7 @@ class WeightService:
         return output_path
 
     def generate_energy_chart(self, output_path="/tmp/energy_chart.png", days=30):
-        if not os.path.exists(DB_PATH):
-            return None, "Database not found."
-
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query(
-            "SELECT date_str, active_calories, resting_calories FROM daily_energy_logs ORDER BY date_str DESC LIMIT ?",
-            conn,
-            params=(days,)
-        )
-        conn.close()
+        df = get_energy_logs_df(days=days)
 
         if df.empty:
             return None, "No calorie log history found yet."
@@ -227,54 +211,6 @@ def build_speed_menu() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_today_burned_calories() -> float:
-    if not os.path.exists(DB_PATH):
-        return 0.0
-
-    now_local = datetime.now(TIMEZONE)
-    today_str = now_local.strftime("%Y-%m-%d")
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (today_str,))
-    row = cur.fetchone()
-
-    total_cals = 0.0
-    if row:
-        active = float(row[0]) if row[0] is not None else 0.0
-        resting = float(row[1]) if row[1] is not None else 0.0
-        total_cals = active + resting
-
-    conn.close()
-    return total_cals
-
-def get_weekly_burned_calories() -> float:
-    if not os.path.exists(DB_PATH):
-        return 0.0
-
-    now_local = datetime.now(TIMEZONE)
-    start_of_week = (now_local - timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    weekly_total = 0.0
-    for i in range(7):
-        day_date = start_of_week + timedelta(days=i)
-        day_str = day_date.strftime("%Y-%m-%d")
-
-        cur.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
-        row = cur.fetchone()
-
-        if row:
-            active = float(row[0]) if row[0] is not None else 0.0
-            resting = float(row[1]) if row[1] is not None else 0.0
-            weekly_total += (active + resting)
-
-    conn.close()
-    return weekly_total
-
 def calculate_progress_summary() -> str:
     current_weight = get_latest_weight()
     target_weight = get_target_weight()
@@ -285,17 +221,25 @@ def calculate_progress_summary() -> str:
     except ValueError:
         weekly_target_kg = 1.0
 
-    weekly_calorie_goal = weekly_target_kg * 7700.0
-    daily_calorie_goal = weekly_calorie_goal / 7.0
+    # Automatisches Verbrennungsziel basierend auf dem gleitenden Durchschnitt (letzte 14 Tage)
+    avg_daily_burn = get_average_daily_burned_calories(days=14)
+    
+    # Falls noch keine echten Daten vorhanden sind, greift ein Standard-Fallback von 2500 kcal
+    if avg_daily_burn == 0.0:
+        avg_daily_burn = 2500.0
 
-    burned_this_week = get_weekly_burned_calories()
-    burned_today = get_today_burned_calories()
+    daily_calorie_goal = avg_daily_burn
+    weekly_calorie_goal = daily_calorie_goal * 7.0
+
+    burned_this_week = get_weekly_burned_calories_from_db()
+    burned_today = get_today_burned_calories_from_db()
 
     remaining_week = max(0.0, weekly_calorie_goal - burned_this_week)
     remaining_today = max(0.0, daily_calorie_goal - burned_today)
 
     msg = (
-        f"⚡ **Calorie Targets Overview** ({weekly_target_kg} kg/week goal)\n\n"
+        f"⚡ **Calorie Targets Overview** ({weekly_target_kg} kg/week goal)\n"
+        f"📈 *Daily Target based on 14-day Moving Average ({int(avg_daily_burn)} kcal)*\n\n"
         f"📅 **Daily Target:**\n"
         f"• **Goal:** {int(daily_calorie_goal)} kcal / day\n"
         f"• **Burned Today:** {int(burned_today)} kcal\n"

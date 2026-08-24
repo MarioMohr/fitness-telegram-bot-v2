@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import os
 import pytz
 import pandas as pd
@@ -317,4 +317,72 @@ def get_latest_body_measures():
         return row['chest_cm'], row['arms_cm'], row['waist_cm'], row['hip_cm']
     
     return None, None, None, None
+
+def get_average_daily_burned_calories(days: int = 14) -> float:
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT active_calories, resting_calories FROM daily_energy_logs ORDER BY date_str DESC LIMIT ?",
+        conn,
+        params=(days,)
+    )
+    conn.close()
+
+    if df.empty:
+        return 0.0
+
+    df['total_calories'] = df['active_calories'] + df['resting_calories']
+    return float(df['total_calories'].mean())
+
+def get_today_burned_calories_from_db() -> float:
+    conn = get_connection()
+    cursor = conn.cursor()
+    today_str = get_local_today().isoformat()
+
+    cursor.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (today_str,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        active = float(row['active_calories']) if row['active_calories'] is not None else 0.0
+        resting = float(row['resting_calories']) if row['resting_calories'] is not None else 0.0
+        return active + resting
+    return 0.0
+
+def get_weekly_burned_calories_from_db() -> float:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_local = get_local_now()
+    start_of_week = (now_local - timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    weekly_total = 0.0
+    for i in range(7):
+        day_date = start_of_week + timedelta(days=i)
+        day_str = day_date.strftime("%Y-%m-%d")
+
+        cursor.execute("SELECT active_calories, resting_calories FROM daily_energy_logs WHERE date_str = ?", (day_str,))
+        row = cursor.fetchone()
+
+        if row:
+            active = float(row['active_calories']) if row['active_calories'] is not None else 0.0
+            resting = float(row['resting_calories']) if row['resting_calories'] is not None else 0.0
+            weekly_total += (active + resting)
+
+    conn.close()
+    return weekly_total
+
+def get_weight_logs_df():
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT timestamp, date_logged, weight_kg FROM weight_logs ORDER BY timestamp ASC", conn)
+    conn.close()
+    return df
+
+def get_energy_logs_df(days: int = 30):
+    conn = get_connection()
+    df = pd.read_sql_query(
+        "SELECT date_str, active_calories, resting_calories FROM daily_energy_logs ORDER BY date_str DESC LIMIT ?",
+        conn,
+        params=(days,)
+    )
+    conn.close()
+    return df
 
