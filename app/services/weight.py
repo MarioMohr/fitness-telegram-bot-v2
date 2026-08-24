@@ -123,11 +123,72 @@ class WeightService:
 
         return output_path
 
+    def generate_energy_chart(self, output_path="/tmp/energy_chart.png", days=30):
+        if not os.path.exists(DB_PATH):
+            return None, "Database not found."
+
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(
+            "SELECT date_str, active_calories, resting_calories FROM daily_energy_logs ORDER BY date_str DESC LIMIT ?",
+            conn,
+            params=(days,)
+        )
+        conn.close()
+
+        if df.empty:
+            return None, "No calorie log history found yet."
+
+        df = df.iloc[::-1].reset_index(drop=True)
+        df['date_str'] = pd.to_datetime(df['date_str'])
+        df['total_calories'] = df['active_calories'] + df['resting_calories']
+
+        avg_cals = df['total_calories'].mean()
+
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(9, 4.5), dpi=150)
+        fig.patch.set_facecolor('#0e0e12')
+        ax.set_facecolor('#15151e')
+
+        ax.bar(df['date_str'], df['resting_calories'], color='#3b82f6', alpha=0.85, label='Resting Cals', width=0.6)
+        ax.bar(df['date_str'], df['active_calories'], bottom=df['resting_calories'], color='#f97316', alpha=0.85, label='Active Cals', width=0.6)
+
+        ax.axhline(y=avg_cals, color='#22c55e', linestyle='--', linewidth=1.8, label=f'Average ({int(avg_cals)} kcal)')
+
+        ax.set_title("Daily Burned Energy History", fontsize=14, pad=15, color='#ffffff', fontweight='bold')
+        ax.set_ylabel("Calories (kcal)", fontsize=11, color='#cccccc')
+        ax.set_xlabel("Date", fontsize=11, color='#cccccc')
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+        ax.grid(True, linestyle='--', alpha=0.2, color='#ffffff')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#444444')
+        ax.spines['bottom'].set_color('#444444')
+
+        ax.legend(facecolor='#1e1e2d', edgecolor='none', labelcolor='#ffffff')
+
+        plt.tight_layout()
+        plt.savefig(output_path, facecolor=fig.get_facecolor(), edgecolor='none')
+        plt.close()
+
+        summary_txt = (
+            f"📊 **Energy Consumption Breakdown ({len(df)} days logged)**\n\n"
+            f"• **Average Total:** {int(avg_cals)} kcal / day\n"
+            f"• **Average Active:** {int(df['active_calories'].mean())} kcal / day\n"
+            f"• **Average Resting:** {int(df['resting_calories'].mean())} kcal / day\n"
+            f"• **Highest Day:** {int(df['total_calories'].max())} kcal\n"
+            f"• **Lowest Day:** {int(df['total_calories'].min())} kcal"
+        )
+
+        return output_path, summary_txt
+
 weight_service = WeightService()
 
 def build_weight_menu() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🔄 Refresh Calories")],
+        [KeyboardButton("🔄 Refresh Calories"), KeyboardButton("📊 Energy Graph")],
         [KeyboardButton("🎯 Set Target Weight"), KeyboardButton("⚡ Set Loss Speed")],
         [KeyboardButton("⬅️ Back to Main Menu")]
     ]
@@ -298,6 +359,26 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await update.message.reply_text(
                 caption_msg,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        return True
+
+    if text_lower in ["📊 energy graph", "energy graph"]:
+        chart_path, summary_msg = weight_service.generate_energy_chart()
+        keyboard = build_weight_menu()
+
+        if chart_path and os.path.exists(chart_path):
+            with open(chart_path, 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=summary_msg,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+        else:
+            await update.message.reply_text(
+                summary_msg,
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
