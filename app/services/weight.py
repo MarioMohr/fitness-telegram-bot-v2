@@ -221,10 +221,8 @@ def calculate_progress_summary() -> str:
     except ValueError:
         weekly_target_kg = 1.0
 
-    # Automatisches Verbrennungsziel basierend auf dem gleitenden Durchschnitt (letzte 14 Tage)
-    avg_daily_burn = get_average_daily_burned_calories(days=14)
+    avg_daily_burn = get_average_daily_burned_calories(days=7)
     
-    # Falls noch keine echten Daten vorhanden sind, greift ein Standard-Fallback von 2500 kcal
     if avg_daily_burn == 0.0:
         avg_daily_burn = 2500.0
 
@@ -238,8 +236,8 @@ def calculate_progress_summary() -> str:
     remaining_today = max(0.0, daily_calorie_goal - burned_today)
 
     msg = (
-        f"⚡ **Calorie Targets Overview** ({weekly_target_kg} kg/week goal)\n"
-        f"📈 *Daily Target based on 14-day Moving Average ({int(avg_daily_burn)} kcal)*\n\n"
+        f"⚡ calorie target overview {weekly_target_kg} kg per week goal\n\n"
+        f"📈 Daily target based on a 7 day moving average\n\n"
         f"📅 **Daily Target:**\n"
         f"• **Goal:** {int(daily_calorie_goal)} kcal / day\n"
         f"• **Burned Today:** {int(burned_today)} kcal\n"

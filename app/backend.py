@@ -111,8 +111,8 @@ def save_or_update_daily_energy(date_str: str, active_cals: float, resting_cals:
         INSERT INTO daily_energy_logs (date_str, active_calories, resting_calories, updated_at)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(date_str) DO UPDATE SET
-            active_calories = excluded.active_calories,
-            resting_calories = excluded.resting_calories,
+            active_calories = MAX(daily_energy_logs.active_calories, excluded.active_calories),
+            resting_calories = MAX(daily_energy_logs.resting_calories, excluded.resting_calories),
             updated_at = CURRENT_TIMESTAMP
     """, (date_str, active_cals, resting_cals))
     conn.commit()
