@@ -127,6 +127,7 @@ weight_service = WeightService()
 
 def build_weight_menu() -> ReplyKeyboardMarkup:
     keyboard = [
+        [KeyboardButton("🔄 Refresh Calories")],
         [KeyboardButton("🎯 Set Target Weight"), KeyboardButton("⚡ Set Loss Speed")],
         [KeyboardButton("⬅️ Back to Main Menu")]
     ]
@@ -266,7 +267,7 @@ async def handle_weight_command(update: Update, context: ContextTypes.DEFAULT_TY
     text_lower = text.lower()
     calc_step = context.user_data.get('calc_step')
 
-    if text_lower in ["weight", "⚖️ weight"]:
+    if text_lower in ["weight", "⚖️ weight", "🔄 refresh calories", "refresh calories"]:
         target_w = context.user_data.get('target_weight')
         if target_w is None:
             target_w = get_target_weight()
