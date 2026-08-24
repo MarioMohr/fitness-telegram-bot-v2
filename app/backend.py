@@ -91,6 +91,30 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS daily_energy_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_str TEXT UNIQUE NOT NULL,
+            active_calories REAL DEFAULT 0,
+            resting_calories REAL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+def save_or_update_daily_energy(date_str: str, active_cals: float, resting_cals: float):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO daily_energy_logs (date_str, active_calories, resting_calories, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(date_str) DO UPDATE SET
+            active_calories = excluded.active_calories,
+            resting_calories = excluded.resting_calories,
+            updated_at = CURRENT_TIMESTAMP
+    """, (date_str, active_cals, resting_cals))
     conn.commit()
     conn.close()
 
